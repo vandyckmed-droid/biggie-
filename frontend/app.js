@@ -187,51 +187,97 @@ function divergingInk(value, bound) {
 }
 
 // ------------------------------------------------------------------- rendering
+/** One list row: rank, identity, score, and a direct watchlist toggle.
+ *
+ *  The row is a <div> rather than a <button> because it contains a real button - the
+ *  watchlist control - and nesting interactive elements is invalid and breaks assistive
+ *  technology. The tappable body is its own button instead.
+ */
 function stockRow(row, opts = {}) {
-  const node = el('button', 'row');
-  node.type = 'button';
+  const node = el('div', 'row');
   node.dataset.symbol = row.symbol;
 
-  node.appendChild(el('div', 'row-rank', opts.rank ?? row.display_rank ?? row.rank ?? '—'));
+  const open = el('button', 'row-open');
+  open.type = 'button';
+  open.setAttribute('aria-label', `${row.symbol} details`);
+
+  open.appendChild(el('div', 'row-rank', opts.rank ?? row.display_rank ?? row.rank ?? '—'));
 
   const main = el('div', 'row-main');
-  const sym = el('div', 'row-sym');
-  sym.appendChild(el('span', null, row.symbol));
-  if (state.watchlist.has(row.symbol)) {
-    const star = el('span', null, '★');
-    star.style.color = 'var(--warning)';
-    star.style.fontSize = '11px';
-    sym.appendChild(star);
-  }
-  main.appendChild(sym);
-  main.appendChild(el('div', 'row-sub', `${row.sector || '—'} · β ${fixed(row.beta)}`));
-  node.appendChild(main);
+  main.appendChild(el('div', 'row-sym', row.symbol));
+  // Abbreviated sector: "Information Technology" alongside a company name overflows a
+  // phone row and truncates the part that identifies the sector.
+  const sector = SECTOR_SHORT[row.sector] || row.sector || '—';
+  const sub = row.name ? `${row.name} · ${sector}` : sector;
+  main.appendChild(el('div', 'row-sub', sub));
+  open.appendChild(main);
 
-  const metrics = el('div', 'row-metrics');
-
-  const scoreBlock = el('div', 'metric-block');
   const isCap = state.settings.window === 'market_cap';
-  const scoreVal = el(
+  const scoreBlock = el('div', 'metric-block');
+  scoreBlock.appendChild(el(
     'div',
     `metric-val ${isCap ? 'flat' : signClass(row.score)}`,
     isCap ? money(row.score) : signed(row.score),
-  );
-  scoreBlock.appendChild(scoreVal);
+  ));
   scoreBlock.appendChild(el('div', 'metric-cap', isCap ? 'mkt cap' : 'score'));
-  metrics.appendChild(scoreBlock);
+  open.appendChild(scoreBlock);
 
-  if (!isCap) {
-    const volBlock = el('div', 'metric-block');
-    volBlock.appendChild(el('div', 'metric-val flat', pct(row.vol, 0)));
-    volBlock.appendChild(
-      el('div', 'metric-cap', state.settings.risk_mode === 'idiosyncratic' ? 'idio σ' : 'σ'),
-    );
-    metrics.appendChild(volBlock);
-  }
-
-  node.appendChild(metrics);
-  node.addEventListener('click', () => openSheet(row.symbol));
+  open.addEventListener('click', () => openSheet(row.symbol));
+  node.appendChild(open);
+  node.appendChild(watchToggle(row.symbol));
   return node;
+}
+
+/** The +/✓ control. Optimistic: the state flips on tap and reverts only if the write
+ *  fails, so the response never waits on storage. */
+function watchToggle(symbol) {
+  const btn = el('button', 'row-pick');
+  btn.type = 'button';
+
+  const paint = () => {
+    const on = state.watchlist.has(symbol);
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.setAttribute('aria-label', `${on ? 'Remove' : 'Add'} ${symbol} ${on ? 'from' : 'to'} watchlist`);
+    btn.textContent = on ? '✓' : '+';
+  };
+  paint();
+
+  btn.addEventListener('click', async (event) => {
+    event.stopPropagation();
+    const wasOn = state.watchlist.has(symbol);
+    // Flip immediately; the tap must feel instant even on a cold storage write.
+    if (wasOn) state.watchlist.delete(symbol);
+    else state.watchlist.add(symbol);
+    paint();
+
+    try {
+      const result = wasOn
+        ? await api(`/watchlist/${encodeURIComponent(symbol)}`, { method: 'DELETE' })
+        : await api('/watchlist', { method: 'POST', body: JSON.stringify({ symbol }) });
+      state.watchlist = new Set(result.symbols);
+      syncWatchToggles();
+      if (state.sheetSymbol === symbol) updateStar(state.watchlist.has(symbol));
+    } catch (err) {
+      if (wasOn) state.watchlist.add(symbol);
+      else state.watchlist.delete(symbol);
+      paint();
+      toast(err.message);
+    }
+  });
+  return btn;
+}
+
+/** Repaint every visible toggle so the list, sheet and watchlist tab never disagree. */
+function syncWatchToggles() {
+  document.querySelectorAll('.row[data-symbol]').forEach((node) => {
+    const btn = node.querySelector('.row-pick');
+    if (!btn) return;
+    const on = state.watchlist.has(node.dataset.symbol);
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', String(on));
+    btn.textContent = on ? '✓' : '+';
+  });
 }
 
 // --------------------------------------------------------------------- Stocks
@@ -293,10 +339,26 @@ function renderWindowChips() {
       state.settings.window = w.key;
       persistSettings({ window: w.key });
       renderWindowChips();
+      renderWindowNote();
       loadStocks(true);
     });
     box.appendChild(chip);
   });
+  renderWindowNote();
+}
+
+/** One muted line stating the skip, because "12M / 6M / 3M" alone would not reveal that
+ *  each window excludes its most recent days - and all three do, proportionally. */
+function renderWindowNote() {
+  const note = $('#window-note');
+  if (!note) return;
+  const w = (state.meta?.windows || []).find((x) => x.key === state.settings.window);
+  if (!w) {
+    note.textContent = 'Ranked by market capitalisation.';
+    return;
+  }
+  note.textContent =
+    `${w.lookback}-day window, skipping the most recent ${w.skip} days.`;
 }
 
 /** GICS sector names are far too long for a phone chip row; these abbreviations keep
@@ -725,35 +787,28 @@ function renderMacroList(assets) {
   const card = el('div', 'card');
   card.appendChild(el('h2', null, 'Ranked Cross-Asset'));
   assets.forEach((a, i) => {
-    const row = el('button', 'row');
-    row.type = 'button';
-    row.appendChild(el('div', 'row-rank', i + 1));
+    // Same row anatomy as the stocks list, so macro assets are watchlistable too.
+    const row = el('div', 'row');
+    row.dataset.symbol = a.symbol;
+
+    const open = el('button', 'row-open');
+    open.type = 'button';
+    open.setAttribute('aria-label', `${a.symbol} details`);
+    open.appendChild(el('div', 'row-rank', i + 1));
 
     const main = el('div', 'row-main');
-    const sym = el('div', 'row-sym');
-    sym.appendChild(el('span', null, a.symbol));
-    if (state.watchlist.has(a.symbol)) {
-      const star = el('span', null, '★');
-      star.style.color = 'var(--warning)';
-      star.style.fontSize = '11px';
-      sym.appendChild(star);
-    }
-    main.appendChild(sym);
-    main.appendChild(el('div', 'row-sub', `${a.label} · ${a.asset_class} · β ${fixed(a.beta)}`));
-    row.appendChild(main);
+    main.appendChild(el('div', 'row-sym', a.symbol));
+    main.appendChild(el('div', 'row-sub', `${a.label} · ${a.asset_class}`));
+    open.appendChild(main);
 
-    const metrics = el('div', 'row-metrics');
-    const s = el('div', 'metric-block');
-    s.appendChild(el('div', `metric-val ${signClass(a.score)}`, signed(a.score)));
-    s.appendChild(el('div', 'metric-cap', 'score'));
-    metrics.appendChild(s);
-    const v = el('div', 'metric-block');
-    v.appendChild(el('div', 'metric-val flat', pct(a.vol, 0)));
-    v.appendChild(el('div', 'metric-cap', 'σ'));
-    metrics.appendChild(v);
-    row.appendChild(metrics);
+    const block = el('div', 'metric-block');
+    block.appendChild(el('div', `metric-val ${signClass(a.score)}`, signed(a.score)));
+    block.appendChild(el('div', 'metric-cap', 'score'));
+    open.appendChild(block);
 
-    row.addEventListener('click', () => openSheet(a.symbol));
+    open.addEventListener('click', () => openSheet(a.symbol));
+    row.appendChild(open);
+    row.appendChild(watchToggle(a.symbol));
     card.appendChild(row);
   });
   return card;
@@ -944,6 +999,7 @@ async function toggleStar() {
       toast(`${symbol} added`);
     }
     updateStar(state.watchlist.has(symbol));
+    syncWatchToggles();
   } catch (err) {
     toast(err.message);
   }
@@ -1034,7 +1090,7 @@ function renderSettings() {
     b.setAttribute('aria-pressed', String(effectiveTheme() === value));
     b.addEventListener('click', () => {
       document.documentElement.dataset.theme = value;
-      try { localStorage.setItem('biggie-theme', value); } catch { /* private mode */ }
+      window.BiggieStore.set('theme', value);
       renderSettings();
       if (state.tab === 'macro') loadMacro();
     });
@@ -1126,6 +1182,10 @@ async function pollRefresh(fill, stage, btn) {
 }
 
 async function persistSettings(patch) {
+  // Write locally first: this is the copy `init()` reads on the next launch, and it must
+  // land even if the API round trip fails.
+  const merged = { ...window.BiggieStore.get('settings', {}), ...patch };
+  window.BiggieStore.set('settings', merged);
   try {
     await api('/settings', { method: 'PUT', body: JSON.stringify(patch) });
   } catch {
@@ -1205,10 +1265,18 @@ async function bootstrap(silent = false) {
 }
 
 function init() {
-  try {
-    const saved = localStorage.getItem('biggie-theme');
-    if (saved) document.documentElement.dataset.theme = saved;
-  } catch { /* private mode */ }
+  // Restore everything the first render depends on *before* rendering, so the UI never
+  // shows defaults and then visibly jumps to the user's actual settings.
+  const store = window.BiggieStore;
+  const savedTheme = store.get('theme');
+  if (savedTheme) document.documentElement.dataset.theme = savedTheme;
+
+  const savedSettings = store.get('settings');
+  if (savedSettings && typeof savedSettings === 'object') {
+    state.settings = { ...state.settings, ...savedSettings };
+  }
+  const savedWatchlist = store.get('watchlist');
+  if (Array.isArray(savedWatchlist)) state.watchlist = new Set(savedWatchlist);
 
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));

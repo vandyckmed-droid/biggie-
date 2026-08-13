@@ -75,22 +75,19 @@
   window.__PREFETCH_SERIES__ = () => ensureSeries().catch(() => {});
 
   const TRADING_DAYS = 252;
-  const WATCHLIST_KEY = 'biggie-watchlist';
-  const SETTINGS_KEY = 'biggie-settings';
+  const WATCHLIST_KEY = 'watchlist';
+  const SETTINGS_KEY = 'settings';
 
   // ------------------------------------------------------------------ storage
-  const readJSON = (key, fallback) => {
-    try {
-      const raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : fallback;
-    } catch { return fallback; }
-  };
-  const writeJSON = (key, value) => {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
-  };
+  const store = window.BiggieStore;
+  const readJSON = (key, fallback) => store.get(key, fallback);
+  const writeJSON = (key, value) => store.set(key, value);
 
-  const getWatchlist = () => readJSON(WATCHLIST_KEY, []);
-  const setWatchlist = (list) => { writeJSON(WATCHLIST_KEY, list); return list; };
+  const getWatchlist = () => {
+    const list = store.get(WATCHLIST_KEY, []);
+    return Array.isArray(list) ? list : [];
+  };
+  const setWatchlist = (list) => { store.set(WATCHLIST_KEY, list); return list; };
 
   // ------------------------------------------------------------- linear algebra
   /** Demean each column of a T x N matrix. */
@@ -608,6 +605,7 @@
         ready: true,
         settings: { ...DEFAULT_SETTINGS, ...readJSON(SETTINGS_KEY, {}) },
         refresh: { running: false, stage: 'daily pipeline', progress: 0, error: null },
+        storage: { kind: store.kind, durable: store.durable },
         regime: DATA.macro.regime,
       };
     }

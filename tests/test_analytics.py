@@ -506,3 +506,40 @@ class TestValidation:
         assert validate.is_newer(new, old)
         assert not validate.is_newer(old, new)
         assert validate.is_newer(new, None)
+
+
+class TestWindowLabelling:
+    """Every window skips proportionally, and the labels must not imply otherwise."""
+
+    def test_all_windows_have_a_skip(self):
+        for window in config.WINDOWS.values():
+            assert window.skip > 0, f"{window.key} must skip recent data"
+
+    def test_skip_matches_the_specified_ratios(self):
+        expected = {"mom_12_1": (250, 20), "mom_6_1": (125, 10), "mom_3_1": (60, 5)}
+        actual = {k: (w.lookback, w.skip) for k, w in config.WINDOWS.items()}
+        assert actual == expected
+
+    def test_labels_do_not_single_out_the_twelve_month_window(self):
+        """`12-1M` beside a bare `6M` reads as "only this one skips", which is false."""
+        labels = [w.label for w in config.WINDOWS.values()]
+        assert labels == ["12M", "6M", "3M"]
+        for label in labels:
+            assert "-1" not in label and "–1" not in label
+
+    def test_each_window_excludes_its_own_recent_days(self):
+        panel, _ = make_panel(n_days=520, n_syms=4)
+        n = panel.returns.shape[0]
+        for window in config.WINDOWS.values():
+            sliced = panel.window(window.lookback, window.skip)
+            assert sliced.shape[0] == window.lookback
+            # The final row of the slice must be `skip` rows back from the newest bar.
+            np.testing.assert_array_equal(sliced[-1], panel.returns[n - window.skip - 1])
+
+    def test_skipping_changes_the_result(self):
+        """A skip that made no difference would be a silent no-op."""
+        panel, _ = make_panel(n_days=400, n_syms=4)
+        for window in config.WINDOWS.values():
+            with_skip = panel.window(window.lookback, window.skip)
+            without = panel.window(window.lookback, 0)
+            assert not np.array_equal(with_skip, without), f"{window.key} skip is inert"

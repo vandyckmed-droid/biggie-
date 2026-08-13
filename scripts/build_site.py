@@ -103,6 +103,7 @@ INDEX_HTML = """<!doctype html>
     <header class="topbar">
       <h1>Stocks <small id="stocks-count"></small></h1>
       <div class="chips" id="window-chips" role="group" aria-label="Ranking window"></div>
+      <p class="window-note" id="window-note"></p>
       <div class="chips" id="sector-chips" role="group" aria-label="Sector filter"></div>
       <input class="search" id="stock-search" type="search" inputmode="search"
              placeholder="Search ticker or company" autocomplete="off"
@@ -159,6 +160,7 @@ INDEX_HTML = """<!doctype html>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<script src="storage.js"></script>
 <script src="data-adapter.js"></script>
 <script src="app.js"></script>
 </body>
@@ -213,6 +215,7 @@ def render_single_file(site: Path, core: dict, series: dict) -> str:
     markup = body[start:end]
 
     css = (site / "styles.css").read_text(encoding="utf-8")
+    storage = _escape_non_ascii((site / "storage.js").read_text(encoding="utf-8"))
     adapter = _escape_non_ascii((site / "data-adapter.js").read_text(encoding="utf-8"))
     app = _escape_non_ascii((site / "app.js").read_text(encoding="utf-8"))
 
@@ -236,6 +239,9 @@ html, body {{ height: 100%; margin: 0; }}
 <script>
 window.__BIGGIE_CORE__ = JSON.parse(document.getElementById('core-data').textContent);
 window.__BIGGIE_SERIES__ = JSON.parse(document.getElementById('series-data').textContent);
+</script>
+<script>
+{storage}
 </script>
 <script>
 {adapter}
@@ -282,6 +288,7 @@ def main() -> int:
     (out / "index.html").write_text(INDEX_HTML, encoding="utf-8")
     shutil.copy(frontend / "styles.css", out / "styles.css")
     shutil.copy(frontend / "app.js", out / "app.js")
+    shutil.copy(frontend / "storage.js", out / "storage.js")
     shutil.copy(frontend / "offline.js", out / "data-adapter.js")
     (out / "manifest.webmanifest").write_text(json.dumps(MANIFEST, indent=2))
     # Tell GitHub Pages not to run the output through Jekyll.

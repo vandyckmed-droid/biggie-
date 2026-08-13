@@ -19,6 +19,7 @@
       <header class="topbar">
         <h1>Stocks <small id="stocks-count"></small></h1>
         <div class="chips" id="window-chips" role="group" aria-label="Ranking window"></div>
+        <p class="window-note" id="window-note"></p>
         <div class="chips" id="sector-chips" role="group" aria-label="Sector filter"></div>
         <input class="search" id="stock-search" type="search" inputmode="search"
                placeholder="Search ticker or company" autocomplete="off" autocorrect="off"
@@ -86,6 +87,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+  <script src="/static/storage.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

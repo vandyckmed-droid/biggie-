@@ -170,10 +170,12 @@ class Window:
         return self.lookback + self.skip
 
 
-#: Skip logic scales with window length (~8% of the lookback), so each window excludes a
-#: proportional slice of short-term reversal.
+#: Skip logic scales with window length (~8% of the lookback), so *every* window excludes
+#: a proportional slice of short-term reversal - not just the 12-month one. Labels are
+#: plain durations for that reason: "12-1M" alongside a bare "6M" would imply that only
+#: the first window skips anything.
 WINDOWS: dict[str, Window] = {
-    "mom_12_1": Window("mom_12_1", "12-1M", 250, 20),
+    "mom_12_1": Window("mom_12_1", "12M", 250, 20),
     "mom_6_1": Window("mom_6_1", "6M", 125, 10),
     "mom_3_1": Window("mom_3_1", "3M", 60, 5),
 }
