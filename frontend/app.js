@@ -38,6 +38,11 @@ function money(v) {
 const signClass = (v) => (num(v) == null ? 'flat' : v > 0 ? 'pos' : v < 0 ? 'neg' : 'flat');
 
 async function api(path, options) {
+  // The standalone hosted build has no server; offline.js answers the same routes
+  // from data embedded in the page.
+  if (window.__OFFLINE_API__) {
+    return window.__OFFLINE_API__(path, options);
+  }
   const res = await fetch(`/api${path}`, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
@@ -142,12 +147,24 @@ function divergingColor(value, bound) {
   return `var(--div-${side}-${step})`;
 }
 
+/** Which palette is actually rendering.
+ *
+ *  Viewers on the "system" setting carry no `data-theme` stamp at all, so the attribute
+ *  alone is not enough - the OS preference decides. Reading only the attribute would put
+ *  white ink on the pale light-mode heatmap steps.
+ */
+function effectiveTheme() {
+  const stamped = document.documentElement.dataset.theme;
+  if (stamped === 'light' || stamped === 'dark') return stamped;
+  return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+}
+
 /** Cell ink. The dark ramp runs dark->mid so white clears 4.5:1 everywhere; the light
  *  ramp runs light->dark, so ink flips to white on the two darkest steps. */
 function divergingInk(value, bound) {
   if (num(value) == null) return 'var(--text-muted)';
   const mag = Math.abs(Math.max(-1, Math.min(1, value / (bound || 1))));
-  if (document.documentElement.dataset.theme === 'light') {
+  if (effectiveTheme() === 'light') {
     return mag > 0.62 ? '#fff' : 'var(--text-primary)';
   }
   return mag < 0.12 ? 'var(--text-secondary)' : '#fff';
@@ -455,13 +472,131 @@ async function loadMacro() {
   }
 
   body.textContent = '';
-  body.appendChild(renderRegime(data.regime));
-  if (state.macroView === 'heatmap') {
-    body.appendChild(renderHeatmap(data.heatmap));
+  if (state.macroView === 'sectors') {
+    body.appendChild(el('div', 'loading', 'Loading…'));
+    try {
+      const books = await api('/portfolios');
+      body.textContent = '';
+      body.appendChild(renderSectorBooks(books));
+    } catch (err) {
+      body.textContent = '';
+      body.appendChild(el('div', 'empty', err.message));
+    }
   } else {
-    body.appendChild(renderMacroList(data.assets));
+    body.appendChild(renderRegime(data.regime));
+    body.appendChild(
+      state.macroView === 'heatmap'
+        ? renderHeatmap(data.heatmap)
+        : renderMacroList(data.assets),
+    );
   }
   $('#macro-asof').textContent = state.meta?.as_of || '';
+}
+
+/** Live sector exposure plus the equal-weight book standing behind each sector. */
+function renderSectorBooks(data) {
+  const wrap = el('div');
+
+  const composite = (data.portfolios || []).find((p) => p.key === 'UNIVERSE');
+  if (composite) {
+    const card = el('div', 'card');
+    card.appendChild(el('h2', null, 'Equal-Weight Composite'));
+    const stats = el('div', 'stat-grid two-up');
+    [
+      ['Ann. return', signedPct(composite.ann_return), signClass(composite.ann_return)],
+      ['Volatility', pct(composite.ann_vol), ''],
+      ['Beta', fixed(composite.beta), ''],
+      ['Max drawdown', signedPct(composite.max_drawdown), 'neg'],
+    ].forEach(([label, value, cls]) => {
+      const box = el('div');
+      box.appendChild(el('div', 'stat-label', label));
+      box.appendChild(el('div', `stat-value ${cls}`, value));
+      stats.appendChild(box);
+    });
+    card.appendChild(stats);
+    card.appendChild(
+      el('div', 'setting-help',
+        `All ${composite.members} names held equally (${pct(composite.weight_each, 2)} each). ` +
+        `Diversification ratio ${fixed(composite.diversification_ratio)} — the weighted average ` +
+        `name volatility divided by the book's own volatility.`),
+    );
+    wrap.appendChild(card);
+  }
+
+  const card = el('div', 'card');
+  card.appendChild(el('h2', null, 'Sector Exposure & Equal-Weight Books'));
+
+  const bookBySector = new Map(
+    (data.portfolios || [])
+      .filter((p) => p.key.startsWith('SECTOR::'))
+      .map((p) => [p.label, p]),
+  );
+
+  (data.sector_exposure || []).forEach((row) => {
+    const book = bookBySector.get(row.sector);
+    const node = el('div', 'sector-row');
+
+    const head = el('div', 'sector-head');
+    head.appendChild(el('span', 'sector-name', row.sector));
+    head.appendChild(
+      el('span', 'sector-count', `${row.count} · ${row.etf || '—'}`),
+    );
+    node.appendChild(head);
+
+    // Equal weight vs cap weight, on a shared scale so the tilt is visible.
+    const maxW = Math.max(row.equal_weight, row.cap_weight, 0.01);
+    const bars = el('div', 'sector-bars');
+    [
+      ['Equal', row.equal_weight, 'var(--series-1)'],
+      ['Cap', row.cap_weight, 'var(--series-2)'],
+    ].forEach(([label, value, color]) => {
+      const line = el('div', 'sector-bar-line');
+      line.appendChild(el('span', 'sector-bar-label', label));
+      const track = el('div', 'weight-track');
+      track.style.height = '12px';
+      const fill = el('div', 'weight-fill');
+      fill.style.width = `${(value / maxW) * 100}%`;
+      fill.style.background = color;
+      track.appendChild(fill);
+      line.appendChild(track);
+      line.appendChild(el('span', 'sector-bar-val', pct(value, 1)));
+      bars.appendChild(line);
+    });
+    node.appendChild(bars);
+
+    if (book) {
+      const stats = el('div', 'sector-stats');
+      [
+        ['ret', signedPct(book.ann_return), signClass(book.ann_return)],
+        ['vol', pct(book.ann_vol, 0), ''],
+        ['β', fixed(book.beta), ''],
+        ['maxDD', signedPct(book.max_drawdown, 0), 'neg'],
+      ].forEach(([label, value, cls]) => {
+        const chip = el('span', 'sector-stat');
+        chip.appendChild(el('span', 'sector-stat-label', label));
+        chip.appendChild(el('span', `sector-stat-val ${cls}`, value));
+        stats.appendChild(chip);
+      });
+      node.appendChild(stats);
+    }
+    card.appendChild(node);
+  });
+
+  const legend = el('div', 'legend-keys');
+  legend.style.marginTop = '10px';
+  [['Equal weight', 'var(--series-1)'], ['Cap weight', 'var(--series-2)']].forEach(
+    ([label, color]) => {
+      const key = el('div', 'legend-key');
+      const sw = el('span', 'legend-swatch');
+      sw.style.background = color;
+      key.appendChild(sw);
+      key.appendChild(el('span', null, label));
+      legend.appendChild(key);
+    },
+  );
+  card.appendChild(legend);
+  wrap.appendChild(card);
+  return wrap;
 }
 
 function renderRegime(regime) {
@@ -877,7 +1012,7 @@ function renderSettings() {
   [['dark', 'Dark'], ['light', 'Light']].forEach(([value, text]) => {
     const b = el('button', null, text);
     b.type = 'button';
-    b.setAttribute('aria-pressed', String(document.documentElement.dataset.theme === value));
+    b.setAttribute('aria-pressed', String(effectiveTheme() === value));
     b.addEventListener('click', () => {
       document.documentElement.dataset.theme = value;
       try { localStorage.setItem('biggie-theme', value); } catch { /* private mode */ }
@@ -1003,7 +1138,7 @@ function switchTab(tab) {
 function renderMacroChips() {
   const box = $('#macro-view-chips');
   box.textContent = '';
-  [['heatmap', 'Heatmap'], ['list', 'Ranked list']].forEach(([key, label]) => {
+  [['heatmap', 'Heatmap'], ['list', 'Ranked list'], ['sectors', 'Sectors']].forEach(([key, label]) => {
     const chip = el('button', 'chip', label);
     chip.type = 'button';
     chip.setAttribute('aria-pressed', String(state.macroView === key));

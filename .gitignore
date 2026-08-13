@@ -16,3 +16,6 @@ package.json
 # OS / editor
 .DS_Store
 *.swp
+
+# Generated standalone build
+dist/
