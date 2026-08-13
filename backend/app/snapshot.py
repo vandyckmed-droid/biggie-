@@ -112,9 +112,18 @@ async def refresh_market_data(
 
         emit(f"Fetching prices for {len(to_fetch)} symbols", 0.08)
         if to_fetch:
+            reference = set(config.REFERENCE_TICKERS)
+            # Reference ETFs first. Every beta, every residual and the whole macro page
+            # depend on them, so if the vendor throttles partway through a cold pull it
+            # must not be these that are missing.
+            ordered = sorted(to_fetch, key=lambda pair: pair[0] not in reference)
+
             by_start: dict[date, list[str]] = {}
-            for symbol, s in to_fetch:
+            for symbol, s in ordered:
                 by_start.setdefault(s, []).append(symbol)
+            # Preserve the reference-first ordering inside each start-date group.
+            for s in by_start:
+                by_start[s].sort(key=lambda sym: sym not in reference)
 
             done = 0
             total = len(to_fetch)
@@ -125,6 +134,21 @@ async def refresh_market_data(
                 bars = await client.histories(syms, start=s, end=end, on_progress=on_progress)
                 store.upsert_prices(bars)
                 done += len(syms)
+
+        if client.throttled:
+            log.warning("vendor throttled %d requests during this refresh", client.throttled)
+
+    # A missing market ETF silently produces null betas and an empty macro page, which is
+    # far worse than a loud failure - the validation gate would reject it anyway.
+    cached_now = store.latest_dates(config.REFERENCE_TICKERS)
+    missing = [t for t in config.REFERENCE_TICKERS if t not in cached_now]
+    if missing:
+        raise RuntimeError(
+            "reference instruments have no price history: "
+            + ", ".join(missing)
+            + ". The vendor probably rate-limited the run; retry, or lower "
+            "BIGGIE_RATE_LIMIT."
+        )
 
     # Keep the cache bounded to the configured history length.
     store.prune_prices(date.today() - timedelta(days=config.HISTORY_DAYS + 45))

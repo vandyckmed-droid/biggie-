@@ -32,11 +32,22 @@ def api_key() -> str:
     return key
 
 
-# Concurrency / politeness. FMP throttles per minute; these defaults stay well inside
-# typical paid limits while still pulling ~1000 symbols in a couple of minutes.
-MAX_CONCURRENCY = int(os.environ.get("BIGGIE_CONCURRENCY", "12"))
+# Concurrency and pacing. FMP throttles per minute and answers a burst with 429s rather
+# than a queue, so requests are paced by a token bucket instead of being fired as fast as
+# the semaphore allows. A cold 1,000-symbol pull takes a few minutes at these settings;
+# that is the right trade against a run that fails halfway and publishes nothing.
+MAX_CONCURRENCY = int(os.environ.get("BIGGIE_CONCURRENCY", "6"))
+
+#: Sustained request rate. Below FMP's lowest paid tier (300/min) so the pipeline works
+#: without knowing which plan the key is on. Raise it via the environment if the plan
+#: allows more.
+RATE_LIMIT_PER_MIN = int(os.environ.get("BIGGIE_RATE_LIMIT", "240"))
+
 REQUEST_TIMEOUT = float(os.environ.get("BIGGIE_TIMEOUT", "30"))
-MAX_RETRIES = 4
+MAX_RETRIES = int(os.environ.get("BIGGIE_MAX_RETRIES", "6"))
+
+#: Longest single backoff after a 429. Generous: waiting a minute beats losing the run.
+MAX_BACKOFF = 90.0
 
 # --------------------------------------------------------------------------------------
 # Universe

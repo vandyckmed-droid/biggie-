@@ -26,15 +26,42 @@ class FMPError(RuntimeError):
     """Raised when FMP returns an error payload we cannot recover from."""
 
 
+class _RateLimiter:
+    """Paces requests to a sustained rate, regardless of how many workers are running.
+
+    A semaphore alone bounds *concurrency*, not *rate*: six workers finishing quickly
+    still burst far past a per-minute quota. This hands out evenly spaced slots so the
+    sustained rate is what the plan allows, which is what stops 429s happening at all
+    rather than reacting once they do.
+    """
+
+    def __init__(self, per_minute: int) -> None:
+        self._interval = 60.0 / max(per_minute, 1)
+        self._lock = asyncio.Lock()
+        self._next = 0.0
+
+    async def acquire(self) -> None:
+        async with self._lock:
+            loop = asyncio.get_running_loop()
+            now = loop.time()
+            start = max(now, self._next)
+            self._next = start + self._interval
+            delay = start - now
+        if delay > 0:
+            await asyncio.sleep(delay)
+
+
 class FMPClient:
     """Thin async wrapper around the FMP `stable` API."""
 
     def __init__(self, key: str | None = None, concurrency: int | None = None) -> None:
         self._key = key or config.api_key()
         self._sem = asyncio.Semaphore(concurrency or config.MAX_CONCURRENCY)
+        self._limiter = _RateLimiter(config.RATE_LIMIT_PER_MIN)
         self._client: httpx.AsyncClient | None = None
         # Set when a 429 is seen; every worker waits this out before its next request.
         self._cooldown_until = 0.0
+        self.throttled = 0
 
     async def __aenter__(self) -> "FMPClient":
         self._client = httpx.AsyncClient(
@@ -72,6 +99,7 @@ class FMPClient:
 
         for attempt in range(config.MAX_RETRIES):
             await self._respect_cooldown()
+            await self._limiter.acquire()
             try:
                 async with self._sem:
                     resp = await self._client.get(path, params=params)
@@ -79,8 +107,17 @@ class FMPClient:
                 last_error = exc
             else:
                 if resp.status_code == 429:
+                    # Pause every worker, not just this one: the quota is per account, so
+                    # letting the others keep firing just deepens the hole.
+                    self.throttled += 1
                     loop = asyncio.get_running_loop()
-                    backoff = 2.0 * (2**attempt)
+                    backoff = min(5.0 * (2**attempt), config.MAX_BACKOFF)
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            backoff = max(backoff, float(retry_after))
+                        except ValueError:
+                            pass
                     self._cooldown_until = max(self._cooldown_until, loop.time() + backoff)
                     last_error = FMPError("rate limited")
                     continue
@@ -102,7 +139,7 @@ class FMPClient:
                         )
                     return payload
 
-            await asyncio.sleep(min(1.5 * (2**attempt), 20.0))
+            await asyncio.sleep(min(1.5 * (2**attempt), config.MAX_BACKOFF))
 
         raise FMPError(f"{path} failed after {config.MAX_RETRIES} attempts: {last_error}")
 
