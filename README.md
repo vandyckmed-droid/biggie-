@@ -47,7 +47,7 @@ live process instead of static files:
 ```
 
 ```bash
-.venv/bin/python -m pytest tests/ -q       # 65 tests, no network required
+.venv/bin/python -m pytest tests/ -q       # 70 tests, no network required
 .venv/bin/python scripts/check_no_secrets.py
 ```
 
@@ -109,17 +109,19 @@ median of 1.02, with NVDA at 1.93 and consumer staples near 0.2.
 
 ### Ranking (`ranking.py`)
 
-`Annualised return ÷ annualised volatility` over a momentum window, where volatility is
-either the plain standard deviation or `sqrt(eᵢᵀ Σ eᵢ)` from the shrunk covariance.
+`Annualised return ÷ annualised volatility` over a momentum window.
 
-Skip length scales with the lookback so each window strips a proportional slice of
-short-term reversal:
+**Every window skips**, proportionally to its lookback, so each one strips a comparable
+slice of short-term reversal. The UI labels are plain durations for exactly this reason:
+`12–1M` beside a bare `6M` would imply only the first window skips anything.
 
 | Window | Lookback | Skip |
 |---|---|---|
-| 12–1M | 250d | 20d |
+| 12M | 250d | 20d |
 | 6M | 125d | 10d |
 | 3M | 60d | 5d |
+
+The active window's lookback and skip are stated in a caption under the ranking chips.
 
 Market cap is available as a fourth ranking.
 
@@ -222,6 +224,12 @@ published and the previous deployment stays live.
 blindness cannot separate, and it is the single most common form. Every cell also prints
 its numeric score, so colour is a second channel rather than the only one. Return figures
 elsewhere use green/red *with an explicit +/− sign*, which is the redundant channel there.
+
+**The watchlist lives on the device.** Selections and settings persist through
+`frontend/storage.js`, which probes `localStorage` by *writing* to it, falls back to
+`sessionStorage` then memory, and reports which backing it got. The earlier version
+wrapped every storage call in a catch-and-ignore, so a browser that refused storage
+degraded silently into "nothing ever persists" with no signal at all.
 
 **Both themes are selected, not flipped.** The dark diverging ramp runs dark→mid so a
 single white ink colour clears 4.5:1 on every step; the light ramp runs light→dark and
