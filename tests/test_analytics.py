@@ -543,3 +543,44 @@ class TestWindowLabelling:
             with_skip = panel.window(window.lookback, window.skip)
             without = panel.window(window.lookback, 0)
             assert not np.array_equal(with_skip, without), f"{window.key} skip is inert"
+
+
+class TestLiquidityGate:
+    """Liquidity must come from traded history, not from a live quote field.
+
+    The vendor's screener reports `volume` for the *current session* and resets it to
+    zero once the session settles. The daily pipeline runs after the close, so gating on
+    it discarded ~89% of the universe and failed the build every single night -
+    deterministically, at exactly the hour the job runs.
+    """
+
+    def _row(self, symbol, volume, cap=1e10, price=100.0):
+        return {
+            "symbol": symbol, "companyName": f"{symbol} Inc.", "marketCap": cap,
+            "price": price, "volume": volume, "sector": "Technology",
+            "industry": "Software", "exchangeShortName": "NASDAQ", "country": "US",
+            "isEtf": False, "isFund": False, "isActivelyTrading": True,
+        }
+
+    def test_zero_live_volume_does_not_empty_the_universe(self):
+        rows = [self._row(f"Z{i:03d}", volume=0) for i in range(200)]
+        report = universe.build_universe(rows)
+        assert len(report.selected) == 200, (
+            "a post-close screener reports zero volume; that means 'not trading now', "
+            "not 'illiquid'"
+        )
+        assert "illiquid" not in report.excluded
+
+    def test_missing_volume_is_also_tolerated(self):
+        rows = [self._row("AAA", volume=None), self._row("BBB", volume=0.0)]
+        report = universe.build_universe(rows)
+        assert len(report.selected) == 2
+
+    def test_a_genuinely_thin_name_is_still_dropped_when_volume_is_known(self):
+        rows = [
+            self._row("THIN", volume=100, price=1000.0),   # $100k/day - too thin
+            self._row("DEEP", volume=1_000_000, price=100.0),
+        ]
+        report = universe.build_universe(rows)
+        assert [c.symbol for c in report.selected] == ["DEEP"]
+        assert report.excluded.get("illiquid") == 1

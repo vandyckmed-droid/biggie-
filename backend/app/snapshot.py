@@ -185,9 +185,27 @@ def build_snapshot(
         raise RuntimeError("price cache is empty - run a refresh first")
 
     panel = build_panel(price_map)
+
+    # Liquidity, measured from actual traded history rather than a live quote field.
+    # This is the real gate: the screener's volume column is zero outside the session.
+    dollar_volume = store.median_dollar_volume(
+        [s for s in symbols if panel.has(s)], lookback=60
+    )
+    # Unknown liquidity passes. A symbol with no volume rows cached is a gap in our own
+    # data, not evidence of thin trading - and defaulting the unknown case to "drop" is
+    # exactly the mistake that emptied the universe in the first place.
+    liquid = [
+        s for s in symbols
+        if panel.has(s)
+        and dollar_volume.get(s, float("inf")) >= config.MIN_AVG_DOLLAR_VOLUME
+    ]
+    dropped = sum(1 for s in symbols if panel.has(s)) - len(liquid)
+    if dropped:
+        log.info("liquidity filter dropped %d thinly traded names", dropped)
+
     # `symbols` is ordered by market cap, so trimming here yields exactly the largest
     # `size` names that actually carry enough history to be ranked.
-    stock_symbols = [s for s in symbols if panel.has(s)][:size]
+    stock_symbols = liquid[:size]
     stock_panel = panel.subset(stock_symbols)
     log.info("panel: %d dates x %d symbols", len(panel.dates), len(panel.symbols))
 

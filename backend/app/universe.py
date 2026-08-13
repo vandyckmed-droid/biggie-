@@ -161,7 +161,16 @@ def _eligible(row: dict[str, Any]) -> str | None:
     price = row.get("price") or 0.0
     if price < config.MIN_PRICE:
         return "below_min_price"
-    if price * (row.get("volume") or 0.0) < config.MIN_AVG_DOLLAR_VOLUME:
+
+    # Liquidity is NOT judged here. The screener's `volume` is a *live session* figure
+    # that the vendor resets to zero once the session settles - after the close it reads
+    # 0 for ~89% of the universe. Gating on it made the nightly pipeline discard almost
+    # everything and fail, deterministically, at exactly the hour it runs.
+    #
+    # A zero here means "not trading right now", not "illiquid". Real liquidity is
+    # measured from cached daily history in `filter_by_liquidity` once prices exist.
+    volume = row.get("volume") or 0.0
+    if volume > 0 and price * volume < config.MIN_AVG_DOLLAR_VOLUME:
         return "illiquid"
     return None
 
