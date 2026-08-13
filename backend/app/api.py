@@ -112,7 +112,7 @@ def _sort_key(row: dict[str, Any]) -> tuple[int, float]:
 def get_meta() -> dict[str, Any]:
     """Everything the client needs to render its chrome before any list loads."""
     data = state.load()
-    settings = {**DEFAULT_SETTINGS, **store.get_settings()}
+    settings = {**DEFAULT_SETTINGS, **normalise_settings(store.get_settings())}
     if data is None:
         return {
             "ready": False,
@@ -441,18 +441,45 @@ def watchlist_hrp(
 
 
 # -------------------------------------------------------------------------- settings
+#: Settings written by an older release name modes that no longer exist. Both former
+#: risk modes were the stock's own volatility, so both normalise to `total`; mapping the
+#: old "covariance" onto `idiosyncratic` would silently change a user's rankings.
+LEGACY_RISK_MODES = {"simple": "total", "covariance": "total"}
+ALLOWED_SETTINGS = {
+    "window": {"mom_12_1", "mom_6_1", "mom_3_1", "market_cap"},
+    "return_mode": {"raw", "residual"},
+    "risk_mode": {"total", "idiosyncratic"},
+}
+
+
+def normalise_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    """Drop or remap values a previous release stored that are no longer valid."""
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key == "risk_mode" and value in LEGACY_RISK_MODES:
+            out[key] = LEGACY_RISK_MODES[value]
+            continue
+        allowed = ALLOWED_SETTINGS.get(key)
+        if allowed and value not in allowed:
+            continue
+        out[key] = value
+    return out
+
+
 @router.get("/settings")
 def get_settings() -> dict[str, Any]:
-    return {**DEFAULT_SETTINGS, **store.get_settings()}
+    return {**DEFAULT_SETTINGS, **normalise_settings(store.get_settings())}
 
 
 @router.put("/settings")
 def put_settings(payload: dict[str, Any]) -> dict[str, Any]:
-    allowed = {k: v for k, v in payload.items() if k in DEFAULT_SETTINGS}
+    allowed = normalise_settings(
+        {k: v for k, v in payload.items() if k in DEFAULT_SETTINGS}
+    )
     if not allowed:
         raise HTTPException(status_code=400, detail="No recognised settings supplied")
     store.save_settings(allowed)
-    return {**DEFAULT_SETTINGS, **store.get_settings()}
+    return {**DEFAULT_SETTINGS, **normalise_settings(store.get_settings())}
 
 
 # --------------------------------------------------------------------------- refresh

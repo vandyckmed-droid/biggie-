@@ -34,7 +34,7 @@ if a credential appears in the repo or the built site.
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 export FMP_API_KEY=your_key             # or API_KEY
-.venv/bin/python scripts/refresh.py     # build a snapshot (~40s cold, ~14s warm)
+.venv/bin/python scripts/refresh.py     # build a snapshot (~5min cold, ~15s warm)
 .venv/bin/python scripts/build_site.py -o site
 (cd site && python3 -m http.server 8000)
 ```
@@ -47,7 +47,8 @@ live process instead of static files:
 ```
 
 ```bash
-.venv/bin/python -m pytest tests/ -q       # 70 tests, no network required
+.venv/bin/python -m pytest tests/ -q       # 81 tests, no network required
+node scripts/smoke_test.js http://127.0.0.1:8000/   # renders the built site
 .venv/bin/python scripts/check_no_secrets.py
 ```
 

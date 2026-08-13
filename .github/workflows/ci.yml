@@ -35,7 +35,7 @@ jobs:
 
       - name: Check frontend scripts parse
         run: |
-          for f in frontend/app.js frontend/offline.js; do
+          for f in frontend/*.js scripts/smoke_test.js; do
             node --check "$f"
           done
 
@@ -43,3 +43,46 @@ jobs:
       # anyone who loads the page. Fail loudly rather than discovering that later.
       - name: Scan for leaked credentials
         run: python scripts/check_no_secrets.py
+
+  # Renders the real site in a phone-sized browser. This is the only check that can see
+  # a client reading field names the pipeline no longer emits - valid JavaScript, valid
+  # JSON, passing Python tests, and a heatmap full of em dashes.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Playwright
+        run: |
+          npm install --no-save playwright@1.49.1
+          npx playwright install --with-deps chromium
+
+      # No API key in this workflow, so the snapshot is synthetic - built by the same
+      # code path production uses, so its shape is the real one.
+      - name: Build a fixture site
+        run: |
+          export BIGGIE_DATA_DIR="$RUNNER_TEMP/fixture"
+          python scripts/make_fixture_snapshot.py
+          python scripts/build_site.py -o site
+
+      - name: Serve and smoke test
+        run: |
+          python -m http.server 8099 --directory site --bind 127.0.0.1 &
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8099/ >/dev/null && break
+            sleep 1
+          done
+          node scripts/smoke_test.js http://127.0.0.1:8099/

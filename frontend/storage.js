@@ -52,6 +52,43 @@ window.BiggieStore = (function () {
         ? 'session'
         : 'local';
 
+  /* Settings persisted by an older release can name modes that no longer exist. The
+     risk denominator changed from simple/covariance to total/idiosyncratic, and a stored
+     "covariance" would leave no button selected (and, against the dev API, return a 422).
+
+     Both former modes normalise to `total`, deliberately. The old "covariance" was the
+     stock's own volatility with shrinkage applied - so it *was* the total-risk
+     denominator. `idiosyncratic` is a different measurement, and silently opting an
+     existing user into it would change their rankings without them asking. */
+  const SETTINGS_ALLOWED = {
+    window: ['mom_12_1', 'mom_6_1', 'mom_3_1', 'market_cap'],
+    return_mode: ['raw', 'residual'],
+    risk_mode: ['total', 'idiosyncratic'],
+  };
+  const LEGACY_RISK_MODE = { simple: 'total', covariance: 'total' };
+
+  function migrateSettings(saved) {
+    if (!saved || typeof saved !== 'object') return null;
+    const out = {};
+    for (const [key, value] of Object.entries(saved)) {
+      if (key === 'risk_mode' && LEGACY_RISK_MODE[value]) {
+        out[key] = LEGACY_RISK_MODE[value];
+        continue;
+      }
+      const allowed = SETTINGS_ALLOWED[key];
+      // Drop unrecognised values rather than passing them on; a stale enum reaching the
+      // UI shows as "nothing selected" and reaching the API as a 422.
+      if (allowed && !allowed.includes(value)) continue;
+      if (key === 'cluster_k') {
+        const k = Number(value);
+        if (Number.isFinite(k) && k >= 2 && k <= 25) out[key] = k;
+        continue;
+      }
+      out[key] = value;
+    }
+    return out;
+  }
+
   return {
     /** Which store won: 'local' persists across sessions, the others do not. */
     kind,
@@ -60,11 +97,16 @@ window.BiggieStore = (function () {
     get(key, fallback = null) {
       try {
         const raw = backing.getItem(PREFIX + key);
-        return raw === null ? fallback : JSON.parse(raw);
+        if (raw === null) return fallback;
+        const value = JSON.parse(raw);
+        return key === 'settings' ? (migrateSettings(value) ?? fallback) : value;
       } catch {
         return fallback;
       }
     },
+
+    /** Exposed for tests; the migration is otherwise applied transparently on read. */
+    migrateSettings,
 
     set(key, value) {
       try {

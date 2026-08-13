@@ -1,8 +1,12 @@
-fastapi>=0.115
-uvicorn[standard]>=0.30
-httpx>=0.27
-numpy>=1.26
-scipy>=1.11
-pandas>=2.1
-scikit-learn>=1.4
-pytest>=8.0
+# Upper bounds are deliberate. Daily numerical output should be reproducible: an
+# unpinned major bump (NumPy 2.x, pandas 3.x) can silently change covariance,
+# regression or clustering results between two runs of identical code. Raise these
+# consciously, with a test run, rather than discovering the change in a ranking.
+numpy>=1.26,<3
+scipy>=1.11,<2
+pandas>=2.1,<4
+scikit-learn>=1.4,<2
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+httpx>=0.27,<1
+pytest>=8.0,<10

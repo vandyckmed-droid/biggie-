@@ -12,8 +12,13 @@ import numpy as np
 
 from . import config
 
-#: A stock may be stale for at most this many sessions before its bar is treated as
-#: missing rather than carried forward. Longer gaps are real halts, not data noise.
+#: A stock may be stale for at most this many sessions before its price is treated as
+#: missing rather than carried forward. This affects the *price* path only - charts and
+#: trailing returns, where a stale quote is an acceptable approximation.
+#:
+#: Returns are never computed from carried-forward prices. Doing so manufactures a run of
+#: zero-return days followed by one catch-up day, which understates volatility and feeds
+#: a distorted covariance into beta, clustering and HRP.
 MAX_FORWARD_FILL = 5
 
 
@@ -109,7 +114,8 @@ def build_panel(
     t = len(calendar)
 
     symbols: list[str] = []
-    columns: list[np.ndarray] = []
+    observed_cols: list[np.ndarray] = []
+    filled_cols: list[np.ndarray] = []
 
     for symbol, series in price_map.items():
         col = np.full(t, np.nan)
@@ -117,18 +123,24 @@ def build_panel(
             i = date_index.get(d)
             if i is not None:
                 col[i] = close
-        col = _forward_fill(col, MAX_FORWARD_FILL)
-        if np.isfinite(col).sum() < min_history:
+        filled = _forward_fill(col, MAX_FORWARD_FILL)
+        if np.isfinite(filled).sum() < min_history:
             continue
         symbols.append(symbol)
-        columns.append(col)
+        observed_cols.append(col)
+        filled_cols.append(filled)
 
     if not symbols:
         raise ValueError("no symbol met the minimum history requirement")
 
-    prices = np.column_stack(columns)
+    observed = np.column_stack(observed_cols)
+    prices = np.column_stack(filled_cols)
+
+    # Returns come from *observed* closes only. Where either endpoint was not actually
+    # traded the return is missing, not zero - every downstream statistic already
+    # excludes NaN, so a genuine gap stays a gap instead of becoming a flat day.
     with np.errstate(invalid="ignore", divide="ignore"):
-        returns = prices[1:] / prices[:-1] - 1.0
+        returns = observed[1:] / observed[:-1] - 1.0
     # A single bad tick can produce an absurd jump; clip to a plausible daily range so
     # one dirty bar cannot dominate a covariance estimate.
     returns = np.where(np.isfinite(returns), returns, np.nan)

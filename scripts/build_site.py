@@ -17,13 +17,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app import config, snapshot as snap, store, validate  # noqa: E402
+from app import config, contract, snapshot as snap, store, validate  # noqa: E402
+from app.returns import build_panel  # noqa: E402
 
 #: Longest chart window plus the longest ranking skip.
 RETURN_HISTORY = 320
@@ -31,28 +33,33 @@ RETURN_PRECISION = 5
 
 
 def build_returns(symbols: list[str]) -> dict[str, object]:
-    """Daily simple returns per symbol, trimmed and rounded to keep the payload small."""
+    """Daily returns per symbol on one shared, dated trading calendar.
+
+    Alignment is by *date*, not by array position. Slicing each symbol's own list to a
+    common length silently pairs a recent listing's first week against an established
+    name's last week, and truncating everyone to the shortest series lets one new IPO
+    shorten the history behind every watchlist HRP.
+
+    Missing observations are emitted as `null` rather than dropped or zero-filled, so the
+    client can exclude them the same way the Python does.
+    """
     price_map = store.load_prices(symbols)
-    kept: list[str] = []
-    rows: list[list[float]] = []
+    if not price_map:
+        return {"dates": [], "symbols": [], "data": []}
 
-    for symbol in symbols:
-        series = price_map.get(symbol)
-        if not series or len(series) < 2:
-            continue
-        closes = [c for _d, c in series][-(RETURN_HISTORY + 1) :]
-        returns = [
-            round(closes[i] / closes[i - 1] - 1.0, RETURN_PRECISION)
-            for i in range(1, len(closes))
-            if closes[i - 1] > 0
-        ]
-        if not returns:
-            continue
-        kept.append(symbol)
-        rows.append(returns)
+    panel = build_panel(price_map, min_history=2)
+    dates = panel.return_dates[-RETURN_HISTORY:]
+    block = panel.returns[-RETURN_HISTORY:]
 
-    width = min((len(r) for r in rows), default=0)
-    return {"symbols": kept, "data": [r[-width:] for r in rows] if width else []}
+    rows: list[list[float | None]] = []
+    for j, _symbol in enumerate(panel.symbols):
+        column = block[:, j]
+        rows.append([
+            None if not math.isfinite(v) else round(float(v), RETURN_PRECISION)
+            for v in column
+        ])
+
+    return {"dates": dates, "symbols": list(panel.symbols), "data": rows}
 
 
 def build_core(data: dict) -> dict:
@@ -71,6 +78,7 @@ def build_core(data: dict) -> dict:
             "universe_report": data.get("universe_report", {}),
             "validation": data.get("validation", {}),
             "market_etf": config.MARKET_ETF,
+            "schema_version": contract.SCHEMA_VERSION,
         },
         "stocks": data["stocks"],
         "macro": data["macro"],
@@ -270,7 +278,9 @@ def main() -> int:
 
     # Never publish a dataset that would not have passed the pipeline's own gate.
     if not args.skip_validation:
-        result = validate.validate_snapshot(data)
+        result = validate.validate_snapshot(
+            data, expected_size=data.get("requested_size") or config.UNIVERSE_SIZE
+        )
         for message in result.warnings:
             print(f"  warning: {message}")
         if not result.ok:
@@ -289,6 +299,8 @@ def main() -> int:
     shutil.copy(frontend / "styles.css", out / "styles.css")
     shutil.copy(frontend / "app.js", out / "app.js")
     shutil.copy(frontend / "storage.js", out / "storage.js")
+    # iOS ignores SVG for home-screen icons; without this PNG the shortcut is blank.
+    shutil.copy(frontend / "icon.png", out / "icon.png")
     shutil.copy(frontend / "offline.js", out / "data-adapter.js")
     (out / "manifest.webmanifest").write_text(json.dumps(MANIFEST, indent=2))
     # Tell GitHub Pages not to run the output through Jekyll.
@@ -298,6 +310,16 @@ def main() -> int:
     data_dir.mkdir()
 
     core = build_core(data)
+
+    # The contract check is the gate that a renamed field cannot slip past: Python tests,
+    # `node --check` and JSON serialisation all stay happy while the client reads nothing.
+    contract_result = contract.check_core(core)
+    if not contract_result.ok:
+        print("Refusing to build: core payload breaks the client contract", file=sys.stderr)
+        for message in contract_result.errors:
+            print(f"  error: {message}", file=sys.stderr)
+        return 1
+
     core_path = data_dir / "core.json"
     core_path.write_text(json.dumps(core, separators=(",", ":")))
 

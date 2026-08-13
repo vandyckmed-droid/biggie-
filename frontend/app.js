@@ -92,6 +92,9 @@ const state = {
     sector: null,
   },
   stocks: { rows: [], total: 0, offset: 0, loading: false, done: false, search: '' },
+  // Monotonic tokens so a slow earlier response cannot overwrite a newer one.
+  stocksToken: 0,
+  sheetToken: 0,
   watchlist: new Set(),
   macroView: 'heatmap',
   sheetSymbol: null,
@@ -201,7 +204,9 @@ function stockRow(row, opts = {}) {
   open.type = 'button';
   open.setAttribute('aria-label', `${row.symbol} details`);
 
-  open.appendChild(el('div', 'row-rank', opts.rank ?? row.display_rank ?? row.rank ?? '—'));
+  // The global rank, always. Renumbering within a sector or search result makes a
+  // sector leader read as universe #1, which the spec explicitly ranks against.
+  open.appendChild(el('div', 'row-rank', row.rank ?? '—'));
 
   const main = el('div', 'row-main');
   main.appendChild(el('div', 'row-sym', row.symbol));
@@ -233,13 +238,17 @@ function stockRow(row, opts = {}) {
 function watchToggle(symbol) {
   const btn = el('button', 'row-pick');
   btn.type = 'button';
+  // The circle is an inner element so the button keeps a full 44px touch target while
+  // the visible mark stays visually secondary to the ticker and score.
+  const dot = el('span', 'pick-dot');
+  btn.appendChild(dot);
 
   const paint = () => {
     const on = state.watchlist.has(symbol);
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', String(on));
     btn.setAttribute('aria-label', `${on ? 'Remove' : 'Add'} ${symbol} ${on ? 'from' : 'to'} watchlist`);
-    btn.textContent = on ? '✓' : '+';
+    dot.textContent = on ? '✓' : '+';
   };
   paint();
 
@@ -272,23 +281,28 @@ function watchToggle(symbol) {
 function syncWatchToggles() {
   document.querySelectorAll('.row[data-symbol]').forEach((node) => {
     const btn = node.querySelector('.row-pick');
-    if (!btn) return;
+    const dot = btn && btn.querySelector('.pick-dot');
+    if (!dot) return;
     const on = state.watchlist.has(node.dataset.symbol);
     btn.classList.toggle('on', on);
     btn.setAttribute('aria-pressed', String(on));
-    btn.textContent = on ? '✓' : '+';
+    dot.textContent = on ? '✓' : '+';
   });
 }
 
 // --------------------------------------------------------------------- Stocks
 async function loadStocks(reset = false) {
-  if (state.stocks.loading) return;
   if (reset) {
+    // Supersede any in-flight request rather than dropping this one: changing the
+    // window while a fetch is running must not leave the previous result on screen.
+    state.stocksToken += 1;
     state.stocks = { ...state.stocks, rows: [], offset: 0, done: false };
     $('#stock-list').textContent = '';
+  } else if (state.stocks.loading || state.stocks.done) {
+    return;
   }
-  if (state.stocks.done) return;
 
+  const token = state.stocksToken;
   state.stocks.loading = true;
   $('#stock-loading').hidden = false;
 
@@ -304,11 +318,14 @@ async function loadStocks(reset = false) {
 
   try {
     const data = await api(`/rankings?${params}`);
+    if (token !== state.stocksToken) return;  // a newer request has taken over
+
     const list = $('#stock-list');
     data.rows.forEach((row) => list.appendChild(stockRow(row)));
     state.stocks.total = data.total;
     state.stocks.offset += data.rows.length;
     state.stocks.done = state.stocks.offset >= data.total || data.rows.length === 0;
+
     const f = freshness(state.meta?.as_of);
     $('#stocks-count').textContent = `${data.total} names \u00b7 ${f.label}`;
     $('#stocks-count').className = f.stale ? 'stale' : '';
@@ -316,11 +333,14 @@ async function loadStocks(reset = false) {
       list.appendChild(el('div', 'empty', 'Nothing matches that filter.'));
     }
   } catch (err) {
+    if (token !== state.stocksToken) return;
     $('#stock-list').appendChild(el('div', 'empty', err.message));
     state.stocks.done = true;
   } finally {
-    state.stocks.loading = false;
-    $('#stock-loading').hidden = true;
+    if (token === state.stocksToken) {
+      state.stocks.loading = false;
+      $('#stock-loading').hidden = true;
+    }
   }
 }
 
@@ -429,7 +449,7 @@ async function loadWatchlist() {
   const listCard = el('div', 'card');
   listCard.appendChild(el('h2', null, 'Holdings'));
   const list = el('div');
-  data.rows.forEach((row, i) => list.appendChild(stockRow(row, { rank: i + 1 })));
+  data.rows.forEach((row) => list.appendChild(stockRow(row)));
   listCard.appendChild(list);
   body.appendChild(listCard);
 
@@ -816,22 +836,33 @@ function renderMacroList(assets) {
 
 // -------------------------------------------------------------- detail sheet
 async function openSheet(symbol) {
+  const token = (state.sheetToken += 1);
   state.sheetSymbol = symbol;
   $('#sheet-sym').textContent = symbol;
   $('#sheet-name').textContent = '';
   $('#sheet-body').textContent = '';
   $('#sheet-body').appendChild(el('div', 'loading', 'Loading…'));
-  $('#sheet').classList.add('open');
+  const sheet = $('#sheet');
+  // Remember where focus came from so closing returns it, and expose the dialog to
+  // assistive tech only while it is actually on screen.
+  state.sheetOpener = document.activeElement;
+  sheet.removeAttribute('aria-hidden');
+  sheet.removeAttribute('inert');
+  sheet.classList.add('open');
   $('#sheet-backdrop').classList.add('open');
+  $('#sheet-close').focus({ preventScroll: true });
 
   let data;
   try {
     data = await api(`/stock/${encodeURIComponent(symbol)}`);
   } catch (err) {
+    if (token !== state.sheetToken) return;
     $('#sheet-body').textContent = '';
     $('#sheet-body').appendChild(el('div', 'empty', err.message));
     return;
   }
+  // Tapping B while A is still loading must not render A over B.
+  if (token !== state.sheetToken) return;
 
   $('#sheet-name').textContent = data.name || data.label || '';
   updateStar(data.in_watchlist);
@@ -867,10 +898,11 @@ function renderSheet(data) {
         ['Market cap', money(data.market_cap), ''],
       ]
     : [
-        ['Score', signed(data[scoreKey]), signClass(data[scoreKey])],
+        // Macro assets carry one score and one volatility, not a per-mode pair.
+        ['Score', signed(data.score), signClass(data.score)],
         ['Rank', data.rank ?? '—', ''],
         ['Ann. return', signedPct(data.ann_return), signClass(data.ann_return)],
-        ['Volatility', pct(data[volKey]), ''],
+        ['Volatility', pct(data.vol), ''],
         ['Beta', fixed(data.beta), ''],
         ['Class', data.asset_class || '—', ''],
       ];
@@ -977,9 +1009,20 @@ function renderSheet(data) {
 }
 
 function closeSheet() {
-  $('#sheet').classList.remove('open');
+  const sheet = $('#sheet');
+  if (!sheet.classList.contains('open')) return;
+  sheet.classList.remove('open');
   $('#sheet-backdrop').classList.remove('open');
+  // A closed dialog that stays in the accessibility tree is still reachable by
+  // VoiceOver and by Tab, which reads as a page full of invisible controls.
+  sheet.setAttribute('aria-hidden', 'true');
+  sheet.setAttribute('inert', '');
   state.sheetSymbol = null;
+  state.sheetToken += 1;
+  if (state.sheetOpener && state.sheetOpener.focus) {
+    state.sheetOpener.focus({ preventScroll: true });
+  }
+  state.sheetOpener = null;
 }
 
 async function toggleStar() {
@@ -1132,6 +1175,29 @@ function renderSettings() {
     dataCard.appendChild(ex);
   }
 
+  // On the deployed site there is nothing to refresh against: the pipeline publishes
+  // after each close. Offering a button that can only fail is worse than saying so.
+  if (window.__OFFLINE_API__) {
+    const status = el('div', 'setting-help');
+    status.style.marginTop = '12px';
+    status.textContent =
+      'Updated automatically after each market close. There is no server to refresh — '
+      + 'the next run replaces this data, and a run that fails validation leaves the '
+      + 'current data in place.';
+    dataCard.appendChild(status);
+    if (!window.BiggieStore.durable) {
+      const warn = el('div', 'setting-help');
+      warn.style.color = 'var(--warning)';
+      warn.style.marginTop = '6px';
+      warn.textContent =
+        'This browser is blocking local storage, so your watchlist and settings will '
+        + 'not survive closing the tab.';
+      dataCard.appendChild(warn);
+    }
+    body.appendChild(dataCard);
+    return;
+  }
+
   const refreshBtn = el('button', 'btn', 'Refresh market data');
   refreshBtn.style.marginTop = '14px';
   const progress = el('div', 'progress');
@@ -1281,6 +1347,9 @@ function init() {
   document.querySelectorAll('.tab').forEach((btn) => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+  // Start closed and inert; openSheet() reverses both.
+  $('#sheet').setAttribute('aria-hidden', 'true');
+  $('#sheet').setAttribute('inert', '');
   $('#sheet-close').addEventListener('click', closeSheet);
   $('#sheet-backdrop').addEventListener('click', closeSheet);
   $('#sheet-star').addEventListener('click', toggleStar);

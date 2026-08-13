@@ -800,23 +800,32 @@ input { font: inherit; }
 .row-open:active { background: var(--surface-2); }
 
 .row-pick {
+  /* Full 44px touch target. Scaling the button itself shrank the hit area with it,
+     leaving roughly 32px - below the comfortable minimum on a phone. */
   width: var(--tap);
   height: var(--tap);
   display: grid;
   place-items: center;
-  font-size: 19px;
+  background: none;
+  border: none;
+}
+.pick-dot {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  font-size: 17px;
   font-weight: 400;
   line-height: 1;
   color: var(--text-muted);
   border: 1px solid var(--border);
   border-radius: 50%;
-  transform: scale(0.72);
-  transition: color .12s, border-color .12s, background .12s;
+  transition: color .12s, border-color .12s, background .12s, transform .12s;
 }
-.row-pick.on {
+.row-pick.on .pick-dot {
   color: #fff;
   background: var(--series-1);
   border-color: var(--series-1);
   font-weight: 700;
 }
-.row-pick:active { transform: scale(0.66); }
+.row-pick:active .pick-dot { transform: scale(0.9); }

@@ -334,4 +334,29 @@ is prefetched in the background.
 
 **Storage degrades explicitly.** `frontend/storage.js` probes localStorage by writing to
 it, falls back to sessionStorage then memory, and reports which it got — silently
-swallowing storage errors is what makes a watchlist quietly fail to persist.
+swallowing storage errors is what makes a watchlist quietly fail to persist. Settings
+written by an older release are normalised on read; both former risk modes map to
+`total`, never to `idiosyncratic`, because that is a different measurement and changing
+it silently would change a user's rankings without them asking.
+
+**The published payload is a contract, and it is enforced.** `backend/app/contract.py`
+declares the field names the client reads; `build_site.py` refuses to publish a payload
+that breaks them, and `scripts/smoke_test.js` renders the built site at 390×844 and
+asserts on *rendered text*. This exists because a macro field rename once shipped a
+heatmap where every cell read "—": the Python suite passed, `node --check` passed, JSON
+has no schema, and a count-based UI check saw 21 cells and called it fine. Only reading
+the pixels catches that class of bug.
+
+**Returns are never computed from carried-forward prices.** Forward-filling a halted
+stock manufactures a run of 0% days followed by one catch-up day, which understates
+volatility and feeds a distorted covariance into beta, clustering and HRP. The price
+path is still filled for charts; returns come from observed closes only, with genuine
+gaps left as missing.
+
+**Published series share one dated calendar.** Aligning by array position pairs a recent
+listing's first week against an established name's last week, and truncating everyone to
+the shortest series lets a single IPO shorten the history behind every watchlist. Gaps
+are published as `null` so the browser excludes them exactly as the Python does.
+
+**List rows always show the global universe rank.** Renumbering after a sector or search
+filter makes a sector leader read as universe #1.

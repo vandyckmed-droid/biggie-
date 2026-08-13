@@ -308,14 +308,19 @@
     return i === undefined || !SERIES ? null : SERIES.data[i];
   };
 
-  /** Cumulative path over the last `days` observations, as return-from-start. */
+  /** Cumulative path over the last `days` observations, as return-from-start.
+   *  A null is a session the symbol did not trade: the level carries forward rather than
+   *  being treated as a 0% day, which would draw a flat segment that never happened. */
   function chartPoints(symbol, days) {
     const series = seriesFor(symbol);
     if (!series) return null;
     const slice = series.slice(Math.max(0, series.length - days));
     const points = [0];
     let level = 1;
-    for (const r of slice) { level *= 1 + r; points.push(level - 1); }
+    for (const r of slice) {
+      if (r != null && Number.isFinite(r)) level *= 1 + r;
+      points.push(level - 1);
+    }
     return points;
   }
 
@@ -335,7 +340,7 @@
       score: m[scoreKey],
       rank: m[rankKey],
       ann_return: m.ann_return,
-      vol: riskMode === 'idiosyncratic' ? m.vol_cov : m.vol_simple,
+      vol: riskMode === 'idiosyncratic' ? m.vol_idio : m.vol,
       risk_contribution: m.risk_contribution,
       cluster: stock.cluster,
     };
@@ -421,17 +426,16 @@
       : { ...base, kind: 'macro', ...macroAsset, name: macroAsset.label };
   }
 
-  function macro(params) {
-    const riskMode = params.get('risk_mode') || 'idiosyncratic';
-    const scoreKey = riskMode === 'idiosyncratic' ? 'score_idio' : 'score_total';
-    const volKey = riskMode === 'idiosyncratic' ? 'vol_idio' : 'vol';
-
+  function macro() {
+    /* Macro assets carry a single score and a single volatility. sqrt(eiT Sigma ei) is
+       just the asset's own volatility, so there is no second denominator to switch
+       between here - which is why this takes no risk mode. */
     const assets = DATA.macro.assets
       .slice()
-      .sort((a, b) => (b[scoreKey] ?? -Infinity) - (a[scoreKey] ?? -Infinity))
+      .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity))
       .map((a, i) => ({
         symbol: a.symbol, label: a.label, asset_class: a.asset_class,
-        score: a[scoreKey], vol: a[volKey], ann_return: a.ann_return,
+        score: a.score, vol: a.vol, ann_return: a.ann_return,
         beta: a.beta, trailing: a.trailing, cluster: a.cluster, rank: i + 1,
       }));
 
@@ -455,7 +459,6 @@
           .map((n) => ({ name: n, cells: groups[n] })),
       },
       diagnostics: DATA.macro.diagnostics || {},
-      risk_mode: riskMode,
     };
   }
 
@@ -475,8 +478,8 @@
         rows.push({
           symbol: asset.symbol, name: asset.label, sector: asset.asset_class,
           beta: asset.beta, market_cap: null, cluster: asset.cluster,
-          score: riskMode === 'idiosyncratic' ? asset.score_cov : asset.score_simple,
-          vol: riskMode === 'idiosyncratic' ? asset.vol_cov : asset.vol_simple,
+          score: asset.score,
+          vol: asset.vol,
           ann_return: asset.ann_return, rank: asset.rank,
         });
       }
@@ -513,14 +516,25 @@
       if (mode === 'residual' && market) {
         const beta = (STOCK_BY_SYMBOL.get(symbol) || MACRO_BY_SYMBOL.get(symbol) || {}).beta;
         const b = Number.isFinite(beta) ? beta : 1;
-        series = series.map((r, i) => r - b * (market[i] ?? 0));
+        series = series.map((r, i) => (
+          r == null || market[i] == null ? null : r - b * market[i]
+        ));
       }
       return cut(series);
     });
 
+    // Every column shares the published trading calendar, so rows line up by date.
+    // Complete-case: a session where any holding did not trade is dropped rather than
+    // imputed, so a gap cannot masquerade as a 0% day and deflate the covariance.
     const t = Math.min(...columns.map((c) => c.length));
     const matrix = [];
-    for (let i = 0; i < t; i++) matrix.push(columns.map((c) => c[c.length - t + i]));
+    for (let i = 0; i < t; i++) {
+      const row = columns.map((c) => c[c.length - t + i]);
+      if (row.every((v) => v != null && Number.isFinite(v))) matrix.push(row);
+    }
+    if (matrix.length < 20) {
+      return { symbols, weights: [], message: 'Not enough overlapping history.' };
+    }
 
     const { cov, shrinkage } = ledoitWolf(matrix);
     const weights = hierarchicalRiskParity(cov);
@@ -611,7 +625,7 @@
     }
     if (route === '/rankings') return rankings(params);
     if (route.startsWith('/stock/')) return stockDetail(decodeURIComponent(route.slice(7)));
-    if (route === '/macro') return macro(params);
+    if (route === '/macro') return macro();
     if (route === '/portfolios') {
       return {
         sector_exposure: DATA.sector_exposure,

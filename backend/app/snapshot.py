@@ -291,6 +291,9 @@ def build_snapshot(
         "as_of": panel.dates[-1] if panel.dates else None,
         "build_seconds": round(time.time() - t0, 1),
         "universe_size": len(stock_symbols),
+        # Recorded so a later re-validation (build_site) judges the snapshot against the
+        # size it was actually asked for, not the configured default.
+        "requested_size": size,
         "trading_days": len(panel.dates),
         "windows": [
             {
