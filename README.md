@@ -9,22 +9,46 @@ re-derived from current data on each refresh.
 
 <img src="docs/stocks.png" width="260" alt="Stocks tab"> <img src="docs/macro.png" width="260" alt="Macro tab"> <img src="docs/watchlist.png" width="260" alt="Watchlist with HRP">
 
-## Quick start
+## How it is deployed
+
+The production system is a **scheduled job plus a static site** - there is no server to
+keep running:
+
+```
+GitHub Actions (after each close) -> FMP -> analytics -> validate -> static site -> Pages -> iPhone
+```
+
+`.github/workflows/daily.yml` runs at 01:30 UTC Tue-Sat (weekday evenings in US Eastern),
+tops up the cached price history, rebuilds every analytic, validates the result, and
+publishes. **A build that fails validation is never deployed**, so the previous good
+dataset stays live. The UI shows the date of the data it is serving.
+
+The API key lives only in the `FMP_API_KEY` Actions secret. It is used in the refresh
+step and nowhere else: `build_site.py` reads the finished snapshot, so the key cannot
+reach the published output. `scripts/check_no_secrets.py` runs in CI and fails the build
+if a credential appears in the repo or the built site.
+
+## Running it locally
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-export FMP_API_KEY=your_key          # or API_KEY
-.venv/bin/python scripts/refresh.py  # build the first snapshot (~40s cold, ~15s warm)
-
-.venv/bin/python -m uvicorn app.api:app --app-dir backend --host 0.0.0.0 --port 8000
+export FMP_API_KEY=your_key             # or API_KEY
+.venv/bin/python scripts/refresh.py     # build a snapshot (~40s cold, ~14s warm)
+.venv/bin/python scripts/build_site.py -o site
+(cd site && python3 -m http.server 8000)
 ```
 
-Open `http://<your-machine>:8000` on your phone. It installs as a PWA from the
-browser's "Add to Home Screen".
+There is also a FastAPI server for development, which serves the same analytics from a
+live process instead of static files:
 
 ```bash
-.venv/bin/python -m pytest tests/ -q   # 55 tests, no network required
+.venv/bin/python -m uvicorn app.api:app --app-dir backend --port 8000
+```
+
+```bash
+.venv/bin/python -m pytest tests/ -q       # 65 tests, no network required
+.venv/bin/python scripts/check_no_secrets.py
 ```
 
 ## How it works
@@ -61,8 +85,15 @@ same data quality.
 
 With ~250 observations and 1,000 names the sample covariance matrix is singular and its
 extreme eigenvalues are noise, so **Ledoit-Wolf shrinkage** is used throughout (measured
-intensity ≈ 0.26 at full universe size). This is what makes per-name volatility, HRP and
+intensity ≈ 0.26 at full universe size). This is what makes HRP, portfolio volatility and
 clustering stable rather than artefacts of estimation error.
+
+**What the covariance matrix is not used for.** For a single asset, `sqrt(eᵢᵀ Σ eᵢ)` is
+simply that asset's own volatility - shrinkage nudges it, but it is not a second
+measurement, and an earlier version of this system wrongly presented it as one (the two
+numbers differed by ~0.5%, which is noise). The covariance matrix now does only the work
+it is genuinely good at: HRP, portfolio risk, risk contribution, correlation,
+diversification and clustering.
 
 Two regressions are run per stock, and reported separately:
 
@@ -90,9 +121,18 @@ short-term reversal:
 | 6M | 125d | 10d |
 | 3M | 60d | 5d |
 
-Market cap is available as a fourth ranking. Every combination of window × (raw ·
-market-adjusted) × (simple σ · covariance σ) is precomputed on refresh, so switching any
-of them on the phone is an instant re-sort rather than a round trip.
+Market cap is available as a fourth ranking.
+
+Two risk denominators are offered, and they are genuinely different measures:
+
+- **Total σ** — the volatility of the return series being ranked.
+- **Idiosyncratic σ** — the volatility of what remains after a market + own-sector factor
+  regression. Across the universe this runs at a median of 0.87× total volatility
+  (range 0.41–1.02) and moves names an average of 20 rank positions, so it rewards
+  stock-specific strength rather than sector beta.
+
+Every combination of window × (raw · market-adjusted) × (total · idiosyncratic) is
+precomputed daily, so switching any of them on the phone is an instant re-sort.
 
 In market-adjusted mode, `residual = stock return − β × VTI return` is applied to every
 daily observation before the window statistics and the covariance are computed.
@@ -130,6 +170,9 @@ context.
 ## Architecture
 
 ```
+.github/workflows/
+  daily.yml      scheduled refresh -> validate -> deploy to Pages
+  ci.yml         tests, JS syntax, credential scan
 backend/app/
   config.py      paths, instrument sets, windows, thresholds
   fmp.py         async FMP client - retry, 429 backoff, key redaction
@@ -141,18 +184,37 @@ backend/app/
   portfolios.py  equal-weight sector and composite books
   hrp.py         hierarchical risk parity, k-medoids
   macro.py       cross-asset ranking, heatmap, regime detection
-  snapshot.py    orchestration -> one self-contained snapshot
-  api.py         FastAPI routes
-frontend/        three static files, no build step
+  snapshot.py    orchestration -> one validated snapshot
+  validate.py    publish gate: freshness, coverage, plausibility
+  api.py         FastAPI routes (development only)
+frontend/
+  app.js         the shell - all four tabs
+  offline.js     data adapter: serves the API surface from published JSON
+  styles.css     dark-first, both themes explicitly designed
+scripts/
+  refresh.py           rebuild the snapshot
+  build_site.py        emit the deployable site
+  check_no_secrets.py  credential tripwire
 ```
 
-Prices live in SQLite and refresh incrementally — a rebuild only asks for bars newer than
-what is cached, with a few days of overlap so late adjustments get corrected. A full
-cold build of 1,000 names takes ~40s; a warm rebuild ~14s. Snapshot builds are
-deterministic: the same cached prices always produce the same output.
+**Payload split.** `core.json` (1.8MB) carries everything the four tabs render and is the
+only thing first paint waits on — ~190ms to a populated list. `series.json` (2.2MB) holds
+the daily return series needed for per-ticker charts and watchlist HRP, and is prefetched
+in the background once the list is up.
 
-The API serves compact rows (six fields) rather than the whole snapshot, so the phone
-never downloads 1.9MB to render a list. Endpoint latency is 3–9ms at full universe size.
+Prices live in SQLite and refresh incrementally — a rebuild only asks for bars newer than
+what is cached, with a few days of overlap so late adjustments get corrected. The cache is
+carried between Actions runs; a cache miss is survivable, costing a full refetch. A cold
+build of 1,000 names takes ~40s, a warm rebuild ~14s. Builds are deterministic: the same
+cached prices always produce the same output.
+
+### Validation gate
+
+`validate.py` checks each build before it can replace the live dataset: universe size,
+data age, score and beta coverage, sector spread, macro completeness, a valid regime, and
+a *plausible median beta*. That last check exists because a wrong regression once shipped
+a median beta of −0.12; it would now fail the build instead. A rejected build is not
+published and the previous deployment stays live.
 
 ## Design notes
 

@@ -1,18 +1,78 @@
-/* Offline API adapter for the standalone build.
+/* Static-site data adapter.
  *
- * The hosted single-file build has no backend, so this reimplements the endpoints the
- * UI calls against a data payload embedded in the page. The numerics that matter -
- * Ledoit-Wolf shrinkage, correlation distance, HRP recursive bisection, k-medoids -
- * are ported from the Python so a watchlist allocation computed here matches the
- * server's answer.
+ * The deployed site has no backend: the daily pipeline publishes JSON and this answers
+ * the same routes the live API does. Two payloads, loaded separately, because the phone
+ * should not wait on data it is not looking at yet:
  *
- * Loaded only when `window.__BIGGIE__` is present; app.js falls back to fetch otherwise.
+ *   data/core.json    every tab's first paint - rankings, macro, sectors
+ *   data/series.json  daily returns, needed only for per-ticker charts and watchlist
+ *                     HRP, so it is fetched lazily and prefetched in the background
+ *
+ * The numerics that matter - Ledoit-Wolf shrinkage, correlation distance, HRP recursive
+ * bisection, k-medoids - are ported from the Python so a watchlist allocation computed
+ * here matches what the pipeline would produce.
  */
 'use strict';
 
 (function () {
-  const DATA = window.__BIGGIE__;
-  if (!DATA) return;
+  // Resolve data URLs against this script, so the site works from a subpath such as
+  // a GitHub Pages project URL (/<repo>/) as well as from a domain root. In the
+  // single-file bundle this script is inline, so `src` is empty and there is nothing
+  // to resolve against - fall back to a relative base rather than throwing.
+  const BASE = (() => {
+    const src = document.currentScript && document.currentScript.src;
+    if (!src) return './';
+    try {
+      return new URL('.', src).href;
+    } catch {
+      return './';
+    }
+  })();
+
+  let DATA = null;
+  let SERIES = null;
+  let corePromise = null;
+  let seriesPromise = null;
+  let STOCK_BY_SYMBOL = new Map();
+  let MACRO_BY_SYMBOL = new Map();
+  let RETURN_INDEX = new Map();
+
+  /* Two delivery shapes share this adapter: the deployed site fetches the JSON files,
+     and the single-file build inlines them on `window`. Reading the inline copy first
+     keeps one code path instead of two adapters that can drift apart. */
+  async function fetchJSON(name, inlineKey) {
+    const inline = window[inlineKey];
+    if (inline) return inline;
+    const res = await fetch(BASE + 'data/' + name, { cache: 'no-cache' });
+    if (!res.ok) throw new Error(`Could not load market data (${res.status})`);
+    return res.json();
+  }
+
+  function ensureCore() {
+    if (!corePromise) {
+      corePromise = fetchJSON('core.json', '__BIGGIE_CORE__').then((json) => {
+        DATA = json;
+        STOCK_BY_SYMBOL = new Map(json.stocks.map((s) => [s.symbol, s]));
+        MACRO_BY_SYMBOL = new Map(json.macro.assets.map((a) => [a.symbol, a]));
+        return json;
+      }).catch((err) => { corePromise = null; throw err; });
+    }
+    return corePromise;
+  }
+
+  function ensureSeries() {
+    if (!seriesPromise) {
+      seriesPromise = fetchJSON('series.json', '__BIGGIE_SERIES__').then((json) => {
+        SERIES = json;
+        RETURN_INDEX = new Map(json.symbols.map((s, i) => [s, i]));
+        return json;
+      }).catch((err) => { seriesPromise = null; throw err; });
+    }
+    return seriesPromise;
+  }
+
+  // Let the shell warm the series file once the list is on screen.
+  window.__PREFETCH_SERIES__ = () => ensureSeries().catch(() => {});
 
   const TRADING_DAYS = 252;
   const WATCHLIST_KEY = 'biggie-watchlist';
@@ -246,13 +306,9 @@
   }
 
   // ------------------------------------------------------------------ data access
-  const STOCK_BY_SYMBOL = new Map(DATA.stocks.map((s) => [s.symbol, s]));
-  const MACRO_BY_SYMBOL = new Map(DATA.macro.assets.map((a) => [a.symbol, a]));
-  const RETURN_INDEX = new Map(DATA.returns.symbols.map((s, i) => [s, i]));
-
   const seriesFor = (symbol) => {
     const i = RETURN_INDEX.get(symbol);
-    return i === undefined ? null : DATA.returns.data[i];
+    return i === undefined || !SERIES ? null : SERIES.data[i];
   };
 
   /** Cumulative path over the last `days` observations, as return-from-start. */
@@ -271,8 +327,8 @@
 
   function rowFor(stock, window, mode, riskMode) {
     const m = metricOf(stock, window, mode);
-    const scoreKey = riskMode === 'covariance' ? 'score_cov' : 'score_simple';
-    const rankKey = riskMode === 'covariance' ? 'rank_cov' : 'rank_simple';
+    const scoreKey = riskMode === 'idiosyncratic' ? 'score_idio' : 'score_total';
+    const rankKey = riskMode === 'idiosyncratic' ? 'rank_idio' : 'rank_total';
     return {
       symbol: stock.symbol,
       name: stock.name,
@@ -282,7 +338,7 @@
       score: m[scoreKey],
       rank: m[rankKey],
       ann_return: m.ann_return,
-      vol: riskMode === 'covariance' ? m.vol_cov : m.vol_simple,
+      vol: riskMode === 'idiosyncratic' ? m.vol_cov : m.vol_simple,
       risk_contribution: m.risk_contribution,
       cluster: stock.cluster,
     };
@@ -301,7 +357,7 @@
   function rankings(params) {
     const window = params.get('window') || 'mom_12_1';
     const mode = params.get('return_mode') || 'raw';
-    const riskMode = params.get('risk_mode') || 'covariance';
+    const riskMode = params.get('risk_mode') || 'idiosyncratic';
     const sector = params.get('sector');
     const search = (params.get('search') || '').trim().toUpperCase();
     const limit = Number(params.get('limit') || 60);
@@ -369,9 +425,9 @@
   }
 
   function macro(params) {
-    const riskMode = params.get('risk_mode') || 'covariance';
-    const scoreKey = riskMode === 'covariance' ? 'score_cov' : 'score_simple';
-    const volKey = riskMode === 'covariance' ? 'vol_cov' : 'vol_simple';
+    const riskMode = params.get('risk_mode') || 'idiosyncratic';
+    const scoreKey = riskMode === 'idiosyncratic' ? 'score_idio' : 'score_total';
+    const volKey = riskMode === 'idiosyncratic' ? 'vol_idio' : 'vol';
 
     const assets = DATA.macro.assets
       .slice()
@@ -411,7 +467,7 @@
     const rawWindow = params.get('window') || 'mom_12_1';
     const window = rawWindow === 'market_cap' ? 'mom_12_1' : rawWindow;
     const mode = params.get('return_mode') || 'raw';
-    const riskMode = params.get('risk_mode') || 'covariance';
+    const riskMode = params.get('risk_mode') || 'idiosyncratic';
 
     const rows = [];
     symbols.forEach((symbol) => {
@@ -422,8 +478,8 @@
         rows.push({
           symbol: asset.symbol, name: asset.label, sector: asset.asset_class,
           beta: asset.beta, market_cap: null, cluster: asset.cluster,
-          score: riskMode === 'covariance' ? asset.score_cov : asset.score_simple,
-          vol: riskMode === 'covariance' ? asset.vol_cov : asset.vol_simple,
+          score: riskMode === 'idiosyncratic' ? asset.score_cov : asset.score_simple,
+          vol: riskMode === 'idiosyncratic' ? asset.vol_cov : asset.vol_simple,
           ann_return: asset.ann_return, rank: asset.rank,
         });
       }
@@ -529,22 +585,29 @@
   }
 
   const DEFAULT_SETTINGS = {
-    window: 'mom_12_1', return_mode: 'raw', risk_mode: 'covariance',
+    window: 'mom_12_1', return_mode: 'raw', risk_mode: 'total',
     cluster_k: 8, sector: null,
   };
 
   // ------------------------------------------------------------------- dispatch
-  window.__OFFLINE_API__ = function offlineApi(path, options = {}) {
+  //: Routes that read daily return series rather than precomputed aggregates.
+  const NEEDS_SERIES = (route) =>
+    route.startsWith('/stock/') || route === '/watchlist/hrp';
+
+  window.__OFFLINE_API__ = async function offlineApi(path, options = {}) {
     const [route, query] = path.split('?');
     const params = new URLSearchParams(query || '');
     const method = (options.method || 'GET').toUpperCase();
+
+    await ensureCore();
+    if (NEEDS_SERIES(route)) await ensureSeries();
 
     if (route === '/meta') {
       return {
         ...DATA.meta,
         ready: true,
         settings: { ...DEFAULT_SETTINGS, ...readJSON(SETTINGS_KEY, {}) },
-        refresh: { running: false, stage: 'static build', progress: 0, error: null },
+        refresh: { running: false, stage: 'daily pipeline', progress: 0, error: null },
         regime: DATA.macro.regime,
       };
     }
@@ -585,8 +648,10 @@
     if (route === '/refresh') {
       // The hosted build ships a fixed snapshot; there is nothing to refresh against.
       return {
-        running: false, stage: 'static build', progress: 0,
-        error: 'This is a hosted snapshot. Run the app locally to pull fresh market data.',
+        running: false,
+        stage: 'daily pipeline',
+        progress: 0,
+        error: 'Data refreshes automatically after each market close.',
         last_build: DATA.meta.built_at,
       };
     }

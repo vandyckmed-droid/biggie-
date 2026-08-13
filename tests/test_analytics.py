@@ -6,6 +6,7 @@ points at the maths rather than at whatever the market did overnight.
 from __future__ import annotations
 
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
-from app import config, hrp, ranking, risk, universe  # noqa: E402
+from app import config, hrp, ranking, risk, universe, validate  # noqa: E402
 from app.returns import (  # noqa: E402
     ReturnPanel,
     annualized_return,
@@ -289,13 +290,33 @@ class TestRanking:
         result = ranking.compute_window(
             stocks, config.WINDOWS["mom_12_1"], return_mode="raw"
         )
-        order = np.argsort(result.ranks["covariance"])
+        order = np.argsort(result.ranks["total"])
         assert [result.symbols[i] for i in order] == ["S00", "S01", "S02"]
 
     def test_score_guards_against_near_zero_volatility(self):
         # A flat series would otherwise divide by ~0 and dominate the ranking.
         scores = ranking._score(np.array([0.5]), np.array([1e-9]))
         assert not np.isfinite(scores[0])
+
+    def test_idiosyncratic_vol_is_below_total_vol(self):
+        """The factor-residual denominator must be a genuinely different measure.
+
+        sqrt(eiT * Sigma * ei) is just the stock's own volatility, so the second risk
+        mode uses what is left after market and sector exposure are removed. Removing
+        explanatory factors can only reduce variance, so the ratio must sit below 1.
+        """
+        panel, _ = make_panel(n_days=520, n_syms=8)
+        stocks = panel.subset([f"S{i:02d}" for i in range(8)])
+        results, _ = ranking.compute_all(stocks, {}, factor_panel=panel)
+        res = results[("mom_12_1", "raw")]
+
+        ratios = res.ann_vol_idio / res.ann_vol
+        finite = ratios[np.isfinite(ratios)]
+        assert finite.size == 8
+        assert (finite < 1.0).all(), "residual vol should be below total vol"
+        assert (finite > 0.05).all(), "residual vol should not collapse to zero"
+        # The two denominators must actually reorder some names, or the toggle is a lie.
+        assert not np.array_equal(res.ranks["total"], res.ranks["idiosyncratic"])
 
     def test_all_window_and_mode_combinations_present(self):
         panel, _ = make_panel(n_syms=6)
@@ -402,3 +423,86 @@ class TestMedoids:
         d = np.zeros((3, 3))
         result = hrp.k_medoids(d, ["A", "B", "C"], k=10)
         assert len(result.medoids) == 3
+
+
+# ---------------------------------------------------------------------- validation
+class TestValidation:
+    """The daily pipeline must refuse to publish a broken dataset."""
+
+    def _snapshot(self, **overrides):
+        stocks = [
+            {
+                "symbol": f"S{i:03d}",
+                "sector": ["Energy", "Financials", "Health Care", "Industrials",
+                           "Information Technology"][i % 5],
+                "beta": 1.0,
+                "metrics": {"mom_12_1|raw": {"score_total": 1.0}},
+            }
+            for i in range(1000)
+        ]
+        base = {
+            "as_of": date.today().isoformat(),
+            "trading_days": 500,
+            "stocks": stocks,
+            "macro": {
+                "assets": [{"symbol": f"E{i}"} for i in range(21)],
+                "regime": {"state": "Risk-On"},
+            },
+            "portfolios": [{"key": "UNIVERSE"}],
+        }
+        base.update(overrides)
+        return base
+
+    def test_healthy_snapshot_passes(self):
+        result = validate.validate_snapshot(self._snapshot())
+        assert result.ok, result.errors
+        assert result.stats["universe_size"] == 1000
+
+    def test_empty_universe_fails(self):
+        assert not validate.validate_snapshot(self._snapshot(stocks=[])).ok
+
+    def test_truncated_universe_fails(self):
+        snap = self._snapshot()
+        snap["stocks"] = snap["stocks"][:100]
+        result = validate.validate_snapshot(snap)
+        assert not result.ok
+        assert any("universe has" in e for e in result.errors)
+
+    def test_stale_data_fails(self):
+        stale = (date.today() - timedelta(days=30)).isoformat()
+        result = validate.validate_snapshot(self._snapshot(as_of=stale))
+        assert not result.ok
+        assert any("days old" in e for e in result.errors)
+
+    def test_missing_scores_fail(self):
+        snap = self._snapshot()
+        for s in snap["stocks"][:500]:
+            s["metrics"]["mom_12_1|raw"]["score_total"] = None
+        result = validate.validate_snapshot(snap)
+        assert not result.ok
+        assert any("score" in e for e in result.errors)
+
+    def test_implausible_median_beta_fails(self):
+        # This is the exact regression that shipped once: a joint market+sector
+        # regression produced a median beta near zero.
+        snap = self._snapshot()
+        for s in snap["stocks"]:
+            s["beta"] = -0.1
+        result = validate.validate_snapshot(snap)
+        assert not result.ok
+        assert any("beta" in e for e in result.errors)
+
+    def test_invalid_regime_fails(self):
+        snap = self._snapshot()
+        snap["macro"]["regime"]["state"] = "Bullish"
+        assert not validate.validate_snapshot(snap).ok
+
+    def test_missing_composite_portfolio_fails(self):
+        assert not validate.validate_snapshot(self._snapshot(portfolios=[])).ok
+
+    def test_older_data_is_not_newer(self):
+        old = {"as_of": "2026-01-01"}
+        new = {"as_of": "2026-02-01"}
+        assert validate.is_newer(new, old)
+        assert not validate.is_newer(old, new)
+        assert validate.is_newer(new, None)

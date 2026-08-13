@@ -1,8 +1,16 @@
-"""Momentum ranking across windows, return modes and risk models.
+"""Momentum ranking across windows, return modes and risk denominators.
 
-Every combination the UI can select is precomputed once per refresh, so switching
-window / raw-vs-residual / simple-vs-covariance on the phone is an instant re-sort of
-data already on the device rather than a round trip.
+Every combination the UI can select is precomputed once per daily refresh, so switching
+window / raw-vs-residual / risk denominator on the phone is an instant re-sort of data
+already on the device.
+
+**On the risk denominator.** For a single asset, ``sqrt(eᵢᵀ Σ eᵢ)`` is just that asset's
+own volatility - shrinkage nudges it, but it is not a different measurement, and an
+earlier version of this system wrongly presented it as one. The genuinely different
+denominator is *idiosyncratic* volatility: the volatility of what is left after a factor
+model removes market and sector exposure. That is what the second risk mode now uses.
+The covariance matrix still does the work it is actually good for - HRP, portfolio
+volatility, risk contribution, correlation and clustering.
 """
 from __future__ import annotations
 
@@ -20,7 +28,11 @@ from .returns import (
 )
 
 RETURN_MODES = ("raw", "residual")
-RISK_MODES = ("simple", "covariance")
+
+#: ``total`` divides by the volatility of the return series being ranked.
+#: ``idiosyncratic`` divides by factor-residual volatility, isolating stock-specific risk.
+RISK_MODES = ("total", "idiosyncratic")
+DEFAULT_RISK_MODE = "total"
 
 
 @dataclass
@@ -32,9 +44,9 @@ class WindowResult:
     symbols: list[str]
     mean_daily: np.ndarray
     ann_return: np.ndarray
-    ann_vol_simple: np.ndarray
-    ann_vol_cov: np.ndarray
-    marginal_risk: np.ndarray
+    ann_vol: np.ndarray             # volatility of the ranked return series
+    ann_vol_idio: np.ndarray        # factor-residual (idiosyncratic) volatility
+    marginal_risk: np.ndarray       # contribution to the equal-weight composite's risk
     risk_contribution: np.ndarray
     scores: dict[str, np.ndarray] = field(default_factory=dict)
     ranks: dict[str, np.ndarray] = field(default_factory=dict)
@@ -73,14 +85,27 @@ def percentile_of(ranks: np.ndarray, n: int) -> np.ndarray:
     return (1.0 - (ranks - 1) / (n - 1)) * 100.0
 
 
+def _window_slice(matrix: np.ndarray, window: config.Window) -> np.ndarray:
+    """The same lookback/skip slice ``ReturnPanel.window`` takes, for a bare matrix."""
+    n = matrix.shape[0]
+    end = n - window.skip
+    start = max(0, end - window.lookback)
+    return matrix[start:end] if end > start else matrix[:0]
+
+
 def compute_window(
     panel: ReturnPanel,
     window: config.Window,
     *,
     return_mode: str,
     returns_override: np.ndarray | None = None,
+    factor_residuals: np.ndarray | None = None,
 ) -> WindowResult:
-    """Compute all statistics for one window under one return mode."""
+    """Compute all statistics for one window under one return mode.
+
+    ``factor_residuals`` is the market+sector residual matrix aligned to ``panel.symbols``;
+    its volatility over the same slice becomes the idiosyncratic denominator.
+    """
     source = panel if returns_override is None else ReturnPanel(
         dates=panel.dates,
         symbols=panel.symbols,
@@ -90,16 +115,18 @@ def compute_window(
     slice_ = source.window(window.lookback, window.skip)
 
     ann_ret = annualized_return(slice_)
-    vol_simple = annualized_volatility(slice_)
+    vol_total = annualized_volatility(slice_)
 
+    if factor_residuals is not None:
+        vol_idio = annualized_volatility(_window_slice(factor_residuals, window))
+    else:
+        vol_idio = np.full_like(vol_total, np.nan)
+
+    # The covariance matrix is still estimated here, but for portfolio-level questions
+    # rather than to restate each stock's own volatility.
     cov = risk.estimate_covariance(slice_, source.symbols)
-    vol_cov = cov.annual_vol
-
-    # Portfolio-aware view, taken against the equal-weight universe composite.
     n = len(source.symbols)
     weights = np.full(n, 1.0 / n) if n else np.zeros(0)
-    marginal = cov.marginal_risk(weights)
-    contribution = cov.risk_contribution(weights)
 
     result = WindowResult(
         window=window.key,
@@ -107,15 +134,15 @@ def compute_window(
         symbols=list(source.symbols),
         mean_daily=mean_daily_return(slice_),
         ann_return=ann_ret,
-        ann_vol_simple=vol_simple,
-        ann_vol_cov=vol_cov,
-        marginal_risk=marginal,
-        risk_contribution=contribution,
+        ann_vol=vol_total,
+        ann_vol_idio=vol_idio,
+        marginal_risk=cov.marginal_risk(weights),
+        risk_contribution=cov.risk_contribution(weights),
         shrinkage=cov.shrinkage,
         observations=cov.observations,
     )
 
-    for risk_mode, vol in (("simple", vol_simple), ("covariance", vol_cov)):
+    for risk_mode, vol in (("total", vol_total), ("idiosyncratic", vol_idio)):
         scores = _score(ann_ret, vol)
         result.scores[risk_mode] = scores
         result.ranks[risk_mode] = rank_desc(scores)
@@ -130,7 +157,7 @@ def compute_all(
     factor_panel: ReturnPanel | None = None,
     windows: Iterable[config.Window] | None = None,
 ) -> tuple[dict[tuple[str, str], WindowResult], risk.FactorModel]:
-    """Every (window, return mode) combination, plus the factor model behind residuals.
+    """Every (window, return mode) combination, plus the factor model behind them.
 
     ``panel`` holds the symbols being ranked; ``factor_panel`` must additionally contain
     the market and sector ETFs, which normally sit outside the ranked universe. Passing
@@ -145,13 +172,22 @@ def compute_all(
     beta_by_symbol = dict(zip(factor_model.symbols, factor_model.beta))
     residual_returns = risk.market_residual_returns(panel, beta_by_symbol, factors)
 
+    # Align the factor-model residual matrix to the ranked universe's column order.
+    factor_index = {s: i for i, s in enumerate(factor_model.symbols)}
+    cols = [factor_index.get(s) for s in panel.symbols]
+    idio = np.full(panel.returns.shape, np.nan)
+    for j, src in enumerate(cols):
+        if src is not None:
+            idio[:, j] = factor_model.residuals[:, src]
+
     results: dict[tuple[str, str], WindowResult] = {}
     for window in windows:
         results[(window.key, "raw")] = compute_window(
-            panel, window, return_mode="raw"
+            panel, window, return_mode="raw", factor_residuals=idio
         )
         results[(window.key, "residual")] = compute_window(
-            panel, window, return_mode="residual", returns_override=residual_returns
+            panel, window, return_mode="residual",
+            returns_override=residual_returns, factor_residuals=idio,
         )
     return results, factor_model
 

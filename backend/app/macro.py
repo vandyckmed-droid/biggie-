@@ -35,10 +35,8 @@ class MacroAsset:
     label: str
     asset_class: str
     ann_return: float
-    ann_vol_simple: float
-    ann_vol_cov: float
-    score_simple: float
-    score_cov: float
+    ann_vol: float
+    score: float
     rank: int
     percentile: float
     beta: float
@@ -77,7 +75,6 @@ def build_macro(
     panel: ReturnPanel,
     *,
     window_key: str = config.DEFAULT_WINDOW,
-    risk_mode: str = "covariance",
     cluster_k: int = 5,
 ) -> tuple[list[MacroAsset], MacroRegime, dict[str, object]]:
     """Rank every macro instrument and derive the regime read."""
@@ -87,14 +84,13 @@ def build_macro(
 
     slice_ = macro_panel.window(window.lookback, window.skip)
     ann_ret = annualized_return(slice_)
-    vol_simple = annualized_volatility(slice_)
+    ann_vol = annualized_volatility(slice_)
 
+    # The joint covariance is kept for correlation, clustering and cross-asset risk
+    # coupling - not to restate each asset's own volatility.
     cov = risk.estimate_covariance(slice_, macro_panel.symbols)
-    vol_cov = cov.annual_vol
 
-    score_simple = ranking._score(ann_ret, vol_simple)
-    score_cov = ranking._score(ann_ret, vol_cov)
-    chosen = score_cov if risk_mode == "covariance" else score_simple
+    chosen = ranking._score(ann_ret, ann_vol)
     ranks = ranking.rank_desc(chosen)
     pcts = ranking.percentile_of(ranks, len(present))
 
@@ -135,10 +131,8 @@ def build_macro(
                 label=config.MACRO_LABELS.get(symbol, symbol),
                 asset_class=config.MACRO_ASSET_CLASS.get(symbol, "Other"),
                 ann_return=_safe(ann_ret[i]),
-                ann_vol_simple=_safe(vol_simple[i]),
-                ann_vol_cov=_safe(vol_cov[i]),
-                score_simple=_safe(score_simple[i]),
-                score_cov=_safe(score_cov[i]),
+                ann_vol=_safe(ann_vol[i]),
+                score=_safe(chosen[i]),
                 rank=int(ranks[i]),
                 percentile=float(pcts[i]),
                 beta=beta,
@@ -302,10 +296,9 @@ def _narrative(
     return "; ".join(bits) + "."
 
 
-def heatmap(assets: list[MacroAsset], risk_mode: str = "covariance") -> dict[str, object]:
+def heatmap(assets: list[MacroAsset]) -> dict[str, object]:
     """Grid payload for the macro heatmap, grouped by asset class."""
-    key = "score_cov" if risk_mode == "covariance" else "score_simple"
-    values = [getattr(a, key) for a in assets if np.isfinite(getattr(a, key))]
+    values = [a.score for a in assets if np.isfinite(a.score)]
     lo = float(np.percentile(values, 5)) if values else -1.0
     hi = float(np.percentile(values, 95)) if values else 1.0
     bound = max(abs(lo), abs(hi), 0.5)
@@ -316,7 +309,7 @@ def heatmap(assets: list[MacroAsset], risk_mode: str = "covariance") -> dict[str
             {
                 "symbol": asset.symbol,
                 "label": asset.label,
-                "score": getattr(asset, key),
+                "score": asset.score,
                 "rank": asset.rank,
                 "ann_return": asset.ann_return,
                 "cluster": asset.cluster,

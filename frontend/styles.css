@@ -777,3 +777,7 @@ input { font: inherit; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* Data-freshness indicator in the header. Amber rather than red: stale data is a
+   warning about age, not a failure - the numbers shown are still real. */
+.topbar h1 small.stale { color: var(--warning); font-weight: 620; }

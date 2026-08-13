@@ -1,0 +1,45 @@
+name: CI
+
+# Fast checks that need no market-data access, so they run on every push without a
+# secret and without touching the vendor API.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check frontend scripts parse
+        run: |
+          for f in frontend/app.js frontend/offline.js; do
+            node --check "$f"
+          done
+
+      # The published site is static and public; a key reaching it would be exposed to
+      # anyone who loads the page. Fail loudly rather than discovering that later.
+      - name: Scan for leaked credentials
+        run: python scripts/check_no_secrets.py

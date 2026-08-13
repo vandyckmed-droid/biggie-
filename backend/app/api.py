@@ -27,12 +27,12 @@ router = APIRouter(prefix="/api")
 
 WindowKey = Literal["mom_12_1", "mom_6_1", "mom_3_1", "market_cap"]
 ReturnMode = Literal["raw", "residual"]
-RiskMode = Literal["simple", "covariance"]
+RiskMode = Literal["total", "idiosyncratic"]
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "window": config.DEFAULT_WINDOW,
     "return_mode": "raw",
-    "risk_mode": "covariance",
+    "risk_mode": ranking.DEFAULT_RISK_MODE,
     "cluster_k": config.DEFAULT_CLUSTER_K,
     "sector": None,
 }
@@ -78,8 +78,9 @@ def _metric(stock: dict[str, Any], window: str, return_mode: str) -> dict[str, A
 def _row(stock: dict[str, Any], window: str, return_mode: str, risk_mode: str) -> dict[str, Any]:
     """The compact payload a list row renders."""
     m = _metric(stock, window, return_mode)
-    score_key = "score_cov" if risk_mode == "covariance" else "score_simple"
-    rank_key = "rank_cov" if risk_mode == "covariance" else "rank_simple"
+    idio = risk_mode == "idiosyncratic"
+    score_key = "score_idio" if idio else "score_total"
+    rank_key = "rank_idio" if idio else "rank_total"
     return {
         "symbol": stock["symbol"],
         "name": stock["name"],
@@ -87,10 +88,10 @@ def _row(stock: dict[str, Any], window: str, return_mode: str, risk_mode: str) -
         "beta": stock.get("beta"),
         "market_cap": stock.get("market_cap"),
         "score": m.get(score_key),
-        "score_alt": m.get("score_simple" if risk_mode == "covariance" else "score_cov"),
+        "score_alt": m.get("score_total" if idio else "score_idio"),
         "rank": m.get(rank_key),
         "ann_return": m.get("ann_return"),
-        "vol": m.get("vol_cov" if risk_mode == "covariance" else "vol_simple"),
+        "vol": m.get("vol_idio" if idio else "vol"),
         "risk_contribution": m.get("risk_contribution"),
         "cluster": stock.get("cluster"),
     }
@@ -144,7 +145,7 @@ def get_meta() -> dict[str, Any]:
 def get_rankings(
     window: WindowKey = Query(config.DEFAULT_WINDOW),
     return_mode: ReturnMode = Query("raw"),
-    risk_mode: RiskMode = Query("covariance"),
+    risk_mode: RiskMode = Query(ranking.DEFAULT_RISK_MODE),
     sector: str | None = Query(None),
     search: str | None = Query(None),
     limit: int = Query(100, ge=1, le=1000),
@@ -263,21 +264,19 @@ def get_stock(symbol: str) -> dict[str, Any]:
 
 
 @router.get("/macro")
-def get_macro(risk_mode: RiskMode = Query("covariance")) -> dict[str, Any]:
+def get_macro() -> dict[str, Any]:
     """Macro dashboard: ranked cross-asset table, heatmap and regime read."""
     data = require_snapshot()
     macro = data["macro"]
-    score_key = "score_cov" if risk_mode == "covariance" else "score_simple"
-    vol_key = "vol_cov" if risk_mode == "covariance" else "vol_simple"
 
     assets = sorted(
         macro["assets"],
-        key=lambda a: (a.get(score_key) is None, -(a.get(score_key) or 0)),
+        key=lambda a: (a.get("score") is None, -(a.get("score") or 0)),
     )
     rows = [
         {
             "symbol": a["symbol"], "label": a["label"], "asset_class": a["asset_class"],
-            "score": a.get(score_key), "vol": a.get(vol_key),
+            "score": a.get("score"), "vol": a.get("vol"),
             "ann_return": a.get("ann_return"), "beta": a.get("beta"),
             "trailing": a.get("trailing", {}), "cluster": a.get("cluster"),
             "rank": i + 1,
@@ -290,7 +289,6 @@ def get_macro(risk_mode: RiskMode = Query("covariance")) -> dict[str, Any]:
         "assets": rows,
         "heatmap": grid,
         "diagnostics": macro.get("diagnostics", {}),
-        "risk_mode": risk_mode,
     }
 
 
@@ -334,7 +332,7 @@ class WatchlistPayload(BaseModel):
 def get_watchlist(
     window: WindowKey = Query(config.DEFAULT_WINDOW),
     return_mode: ReturnMode = Query("raw"),
-    risk_mode: RiskMode = Query("covariance"),
+    risk_mode: RiskMode = Query(ranking.DEFAULT_RISK_MODE),
 ) -> dict[str, Any]:
     symbols = store.get_watchlist()
     data = state.load()
@@ -348,14 +346,12 @@ def get_watchlist(
                 rows.append(_row(by_symbol[symbol], w, return_mode, risk_mode))
             elif symbol in macro_by_symbol:
                 a = macro_by_symbol[symbol]
-                key = "score_cov" if risk_mode == "covariance" else "score_simple"
                 rows.append(
                     {
                         "symbol": a["symbol"], "name": a["label"],
                         "sector": a["asset_class"], "beta": a.get("beta"),
-                        "score": a.get(key), "rank": a.get("rank"),
-                        "ann_return": a.get("ann_return"),
-                        "vol": a.get("vol_cov" if risk_mode == "covariance" else "vol_simple"),
+                        "score": a.get("score"), "rank": a.get("rank"),
+                        "ann_return": a.get("ann_return"), "vol": a.get("vol"),
                         "market_cap": None, "cluster": a.get("cluster"),
                     }
                 )

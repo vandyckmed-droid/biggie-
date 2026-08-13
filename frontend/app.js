@@ -64,6 +64,22 @@ function toast(message) {
   toastTimer = setTimeout(() => node.classList.remove('show'), 2200);
 }
 
+/** How stale the published dataset is, in plain words.
+ *  The pipeline runs after each market close, so "today" and "yesterday" are normal and
+ *  anything older is worth flagging rather than hiding. */
+function freshness(asOf) {
+  if (!asOf) return { label: 'no data', stale: true };
+  const today = new Date();
+  const then = new Date(asOf + 'T00:00:00');
+  const days = Math.round((Date.UTC(today.getFullYear(), today.getMonth(), today.getDate())
+    - Date.UTC(then.getFullYear(), then.getMonth(), then.getDate())) / 86400000);
+  if (days <= 0) return { label: 'today', stale: false, days };
+  if (days === 1) return { label: 'yesterday', stale: false, days };
+  // Friday close read on Sunday is still current data, not a failure.
+  if (days <= 4) return { label: `${days} days ago`, stale: false, days };
+  return { label: `${days} days ago`, stale: true, days };
+}
+
 // ------------------------------------------------------------------ app state
 const state = {
   tab: 'stocks',
@@ -71,7 +87,7 @@ const state = {
   settings: {
     window: 'mom_12_1',
     return_mode: 'raw',
-    risk_mode: 'covariance',
+    risk_mode: 'total',
     cluster_k: 8,
     sector: null,
   },
@@ -208,7 +224,7 @@ function stockRow(row, opts = {}) {
     const volBlock = el('div', 'metric-block');
     volBlock.appendChild(el('div', 'metric-val flat', pct(row.vol, 0)));
     volBlock.appendChild(
-      el('div', 'metric-cap', state.settings.risk_mode === 'covariance' ? 'σ cov' : 'σ'),
+      el('div', 'metric-cap', state.settings.risk_mode === 'idiosyncratic' ? 'idio σ' : 'σ'),
     );
     metrics.appendChild(volBlock);
   }
@@ -247,7 +263,9 @@ async function loadStocks(reset = false) {
     state.stocks.total = data.total;
     state.stocks.offset += data.rows.length;
     state.stocks.done = state.stocks.offset >= data.total || data.rows.length === 0;
-    $('#stocks-count').textContent = `${data.total} names`;
+    const f = freshness(state.meta?.as_of);
+    $('#stocks-count').textContent = `${data.total} names \u00b7 ${f.label}`;
+    $('#stocks-count').className = f.stale ? 'stale' : '';
     if (data.total === 0) {
       list.appendChild(el('div', 'empty', 'Nothing matches that filter.'));
     }
@@ -464,7 +482,7 @@ async function loadMacro() {
 
   let data;
   try {
-    data = await api(`/macro?risk_mode=${state.settings.risk_mode}`);
+    data = await api('/macro');
   } catch (err) {
     body.textContent = '';
     body.appendChild(el('div', 'empty', err.message));
@@ -781,13 +799,13 @@ function renderSheet(data) {
   const isStock = data.kind === 'stock';
   const metricKey = `${state.settings.window === 'market_cap' ? 'mom_12_1' : state.settings.window}|${state.settings.return_mode}`;
   const m = (data.metrics || {})[metricKey] || {};
-  const scoreKey = state.settings.risk_mode === 'covariance' ? 'score_cov' : 'score_simple';
-  const volKey = state.settings.risk_mode === 'covariance' ? 'vol_cov' : 'vol_simple';
+  const scoreKey = state.settings.risk_mode === 'idiosyncratic' ? 'score_idio' : 'score_total';
+  const volKey = state.settings.risk_mode === 'idiosyncratic' ? 'vol_idio' : 'vol';
 
   const entries = isStock
     ? [
         ['Score', signed(m[scoreKey]), signClass(m[scoreKey])],
-        ['Rank', m[state.settings.risk_mode === 'covariance' ? 'rank_cov' : 'rank_simple'] ?? '—', ''],
+        ['Rank', m[state.settings.risk_mode === 'idiosyncratic' ? 'rank_idio' : 'rank_total'] ?? '—', ''],
         ['Ann. return', signedPct(m.ann_return), signClass(m.ann_return)],
         ['Volatility', pct(m[volKey]), ''],
         ['Beta', fixed(data.beta), ''],
@@ -839,8 +857,8 @@ function renderSheet(data) {
         ['Sector beta', fixed(data.sector_beta)],
         ['Factor R²', fixed(data.r_squared)],
         ['Idiosyncratic vol', pct(data.idio_vol)],
-        ['Covariance σ', pct(m.vol_cov)],
-        ['Standalone σ', pct(m.vol_simple)],
+        ['Total σ (window)', pct(m.vol)],
+        ['Idiosyncratic σ (window)', pct(m.vol_idio)],
         ['Marginal risk', pct(m.marginal_risk)],
         ['Risk contribution', m.risk_contribution == null ? '—' : `${(m.risk_contribution * 100).toFixed(3)}%`],
         ['Cluster', data.cluster || '—'],
@@ -848,8 +866,7 @@ function renderSheet(data) {
       ]
     : [
         ['Market beta (VTI)', fixed(data.beta)],
-        ['Covariance σ', pct(data.vol_cov)],
-        ['Standalone σ', pct(data.vol_simple)],
+        ['Volatility', pct(data.vol)],
         ['Asset class', data.asset_class || '—'],
       ];
   rows.forEach(([k, v]) => {
@@ -894,7 +911,7 @@ function renderSheet(data) {
       const row = el('div', 'kv');
       row.appendChild(el('dt', null, `${w.label} (skip ${w.skip}d)`));
       const dd = el('dd', null,
-        `${signed(wm[scoreKey])}  ·  #${wm[state.settings.risk_mode === 'covariance' ? 'rank_cov' : 'rank_simple'] ?? '—'}`);
+        `${signed(wm[scoreKey])}  ·  #${wm[state.settings.risk_mode === 'idiosyncratic' ? 'rank_idio' : 'rank_total'] ?? '—'}`);
       dd.className = signClass(wm[scoreKey]);
       row.appendChild(dd);
       dl2.appendChild(row);
@@ -978,10 +995,12 @@ function renderSettings() {
   ));
 
   card.appendChild(segment(
-    'Covariance mode',
-    'Full covariance uses a Ledoit-Wolf shrunk matrix for volatility — more stable than a raw standard deviation when names outnumber observations.',
+    'Risk denominator',
+    'Total divides by the volatility of the returns being ranked. Idiosyncratic divides by '
+    + 'what is left after a market and sector factor model — a genuinely different measure, '
+    + 'rewarding stock-specific strength over sector beta.',
     'risk_mode',
-    [['simple', 'Simple σ'], ['covariance', 'Full covariance']],
+    [['total', 'Total σ'], ['idiosyncratic', 'Idiosyncratic σ']],
   ));
 
   // Cluster k
@@ -1032,8 +1051,8 @@ function renderSettings() {
   const meta = state.meta || {};
   const report = meta.universe_report || {};
   [
+    ['Market data as of', meta.as_of ? `${meta.as_of} (${freshness(meta.as_of).label})` : '—'],
     ['Universe', meta.universe_size ?? '—'],
-    ['As of', meta.as_of || '—'],
     ['Trading days', meta.trading_days ?? '—'],
     ['Screened', report.screened ?? '—'],
     ['Duplicates collapsed', report.deduped ?? '—'],
@@ -1175,6 +1194,11 @@ async function bootstrap(silent = false) {
     }
     if (!silent) switchTab(state.tab);
     else refreshActiveTab();
+
+    // Warm the per-ticker series in the background so the first chart tap is instant.
+    if (window.__PREFETCH_SERIES__) {
+      setTimeout(() => window.__PREFETCH_SERIES__(), 400);
+    }
   } catch (err) {
     $('#stock-list').appendChild(el('div', 'empty', err.message));
   }

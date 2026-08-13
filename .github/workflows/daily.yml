@@ -1,0 +1,118 @@
+name: Daily refresh and deploy
+
+# Runs after each US market close, rebuilds the analytical dataset, and publishes the
+# static site. If any step fails the deploy is skipped, so the previously published
+# dataset stays live rather than being replaced by something broken.
+on:
+  schedule:
+    # 01:30 UTC Tue-Sat = weekday evenings in US Eastern, a few hours after the 16:00
+    # close so the vendor's end-of-day bars have settled in both DST states.
+    - cron: "30 1 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      force_full:
+        description: "Ignore the price cache and refetch all history"
+        type: boolean
+        default: false
+      universe_size:
+        description: "Number of stocks in the universe"
+        type: string
+        default: "1000"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; let a running one finish so a half-published site is
+# never left behind.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Rolling cache: the exact key never hits, so every run saves a fresh copy, while
+      # restore-keys pulls the most recent previous one. A miss is survivable - the
+      # pipeline just refetches two years of history.
+      - name: Restore price cache
+        uses: actions/cache@v4
+        with:
+          path: data
+          key: prices-${{ github.run_id }}
+          restore-keys: prices-
+
+      - name: Check API key is configured
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          if [ -z "$FMP_API_KEY" ]; then
+            echo "::error::FMP_API_KEY secret is not set. Add it under" \
+                 "Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+
+      - name: Refresh market data
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          python scripts/refresh.py \
+            --size "${{ inputs.universe_size || '1000' }}" \
+            ${{ inputs.force_full && '--full' || '' }} \
+            --quiet
+
+      - name: Run tests
+        run: python -m pytest tests/ -q
+
+      # Builds only from the validated snapshot - no key is available or needed here,
+      # so it cannot reach the published output.
+      - name: Build static site
+        run: python scripts/build_site.py -o site
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Daily refresh"
+            echo
+            python - <<'PY'
+          import json
+          m = json.load(open("site/data/manifest.json"))
+          v = json.load(open("data/snapshot.json")).get("validation", {})
+          print(f"- Market data as of **{m['as_of']}**")
+          print(f"- Universe: **{m['universe_size']}** names")
+          print(f"- Validation: {'passed' if v.get('ok') else 'FAILED'}")
+          for w in v.get("warnings", []):
+              print(f"  - warning: {w}")
+          PY
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

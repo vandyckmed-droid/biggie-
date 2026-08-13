@@ -18,7 +18,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 
-from . import config, hrp, macro, portfolios, ranking, risk, store, universe
+from . import config, hrp, macro, portfolios, ranking, risk, store, universe, validate
 from .fmp import FMPClient
 from .returns import ReturnPanel, build_panel, trailing_return
 
@@ -197,12 +197,12 @@ def build_snapshot(
             metrics[f"{window_key}|{return_mode}"] = {
                 "ann_return": _clean(res.ann_return[j]),
                 "mean_daily": _clean(res.mean_daily[j]),
-                "vol_simple": _clean(res.ann_vol_simple[j]),
-                "vol_cov": _clean(res.ann_vol_cov[j]),
-                "score_simple": _clean(res.scores["simple"][j]),
-                "score_cov": _clean(res.scores["covariance"][j]),
-                "rank_simple": int(res.ranks["simple"][j]),
-                "rank_cov": int(res.ranks["covariance"][j]),
+                "vol": _clean(res.ann_vol[j]),
+                "vol_idio": _clean(res.ann_vol_idio[j]),
+                "score_total": _clean(res.scores["total"][j]),
+                "score_idio": _clean(res.scores["idiosyncratic"][j]),
+                "rank_total": int(res.ranks["total"][j]),
+                "rank_idio": int(res.ranks["idiosyncratic"][j]),
                 "marginal_risk": _clean(res.marginal_risk[j]),
                 "risk_contribution": _clean(res.risk_contribution[j]),
             }
@@ -297,10 +297,8 @@ def build_snapshot(
                 {
                     "symbol": a.symbol, "label": a.label, "asset_class": a.asset_class,
                     "ann_return": _clean(a.ann_return),
-                    "vol_simple": _clean(a.ann_vol_simple),
-                    "vol_cov": _clean(a.ann_vol_cov),
-                    "score_simple": _clean(a.score_simple),
-                    "score_cov": _clean(a.score_cov),
+                    "vol": _clean(a.ann_vol),
+                    "score": _clean(a.score),
                     "rank": a.rank, "percentile": _clean(a.percentile),
                     "beta": _clean(a.beta), "trailing": _clean(a.trailing),
                     "cluster": a.cluster,
@@ -367,14 +365,27 @@ def load_snapshot() -> dict[str, Any] | None:
         return None
 
 
+class RefreshRejected(RuntimeError):
+    """A build completed but failed validation, so it was not published."""
+
+    def __init__(self, result: "validate.ValidationResult") -> None:
+        super().__init__("; ".join(result.errors) or "validation failed")
+        self.result = result
+
+
 async def full_refresh(
     *,
     size: int = config.UNIVERSE_SIZE,
     cluster_k: int = config.DEFAULT_CLUSTER_K,
     progress: ProgressFn | None = None,
     force_full: bool = False,
+    skip_validation: bool = False,
 ) -> dict[str, Any]:
-    """Fetch, compute and persist a complete snapshot."""
+    """Fetch, compute, validate and persist a complete snapshot.
+
+    A snapshot that fails validation is never written, so the previously published
+    dataset stays live rather than being replaced by something broken.
+    """
     selected, report = await refresh_market_data(
         size=size, progress=progress, force_full=force_full
     )
@@ -382,5 +393,30 @@ async def full_refresh(
         build_snapshot, selected, report,
         size=size, cluster_k=cluster_k, progress=progress,
     )
+
+    if not skip_validation:
+        result = validate.validate_snapshot(snapshot, expected_size=size)
+        snapshot["validation"] = {
+            "ok": result.ok,
+            "errors": result.errors,
+            "warnings": result.warnings,
+            "stats": result.stats,
+        }
+        for message in result.warnings:
+            log.warning("validation: %s", message)
+        if not result.ok:
+            for message in result.errors:
+                log.error("validation: %s", message)
+            raise RefreshRejected(result)
+
+        previous = load_snapshot()
+        if not validate.is_newer(snapshot, previous):
+            log.warning(
+                "built data (%s) is older than what is published (%s); keeping the "
+                "existing dataset",
+                snapshot.get("as_of"), (previous or {}).get("as_of"),
+            )
+            return previous or snapshot
+
     save_snapshot(snapshot)
     return snapshot
