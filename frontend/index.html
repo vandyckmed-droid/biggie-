@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=5">
+  <meta name="theme-color" content="#101010">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="description" content="Risk-adjusted stock ranking and macro market intelligence">
+  <title>Biggie</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23101010'/%3E%3Cg fill='%233987e5'%3E%3Crect x='12' y='34' width='8' height='18' rx='2'/%3E%3Crect x='24' y='25' width='8' height='27' rx='2'/%3E%3Crect x='36' y='17' width='8' height='35' rx='2'/%3E%3Crect x='48' y='11' width='8' height='41' rx='2'/%3E%3C/g%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- ------------------------------------------------------------ Stocks -->
+    <section class="page" id="page-stocks" role="tabpanel" aria-label="Stocks">
+      <header class="topbar">
+        <h1>Stocks <small id="stocks-count"></small></h1>
+        <div class="chips" id="window-chips" role="group" aria-label="Ranking window"></div>
+        <div class="chips" id="sector-chips" role="group" aria-label="Sector filter"></div>
+        <input class="search" id="stock-search" type="search" inputmode="search"
+               placeholder="Search ticker or company" autocomplete="off" autocorrect="off"
+               spellcheck="false" aria-label="Search stocks">
+      </header>
+      <div class="list" id="stock-list"></div>
+      <div class="sentinel" id="stock-sentinel"></div>
+      <div class="loading" id="stock-loading" hidden>Loading…</div>
+    </section>
+
+    <!-- --------------------------------------------------------- Watchlist -->
+    <section class="page" id="page-watchlist" role="tabpanel" aria-label="Watchlist" hidden>
+      <header class="topbar">
+        <h1>Watchlist <small id="watchlist-count"></small></h1>
+      </header>
+      <div id="watchlist-body"></div>
+    </section>
+
+    <!-- ------------------------------------------------------------- Macro -->
+    <section class="page" id="page-macro" role="tabpanel" aria-label="Macro market" hidden>
+      <header class="topbar">
+        <h1>Macro Market <small id="macro-asof"></small></h1>
+        <div class="chips" id="macro-view-chips" role="group" aria-label="Macro view"></div>
+      </header>
+      <div id="macro-body"></div>
+    </section>
+
+    <!-- ---------------------------------------------------------- Settings -->
+    <section class="page" id="page-settings" role="tabpanel" aria-label="Settings" hidden>
+      <header class="topbar"><h1>Settings</h1></header>
+      <div id="settings-body"></div>
+    </section>
+
+    <!-- ------------------------------------------------------------ Tabbar -->
+    <nav class="tabbar" role="tablist" aria-label="Sections">
+      <button class="tab" role="tab" data-tab="stocks" aria-selected="true">
+        <span class="glyph" aria-hidden="true">▦</span><span>Stocks</span>
+      </button>
+      <button class="tab" role="tab" data-tab="watchlist" aria-selected="false">
+        <span class="glyph" aria-hidden="true">★</span><span>Watchlist</span>
+      </button>
+      <button class="tab" role="tab" data-tab="macro" aria-selected="false">
+        <span class="glyph" aria-hidden="true">◐</span><span>Macro</span>
+      </button>
+      <button class="tab" role="tab" data-tab="settings" aria-selected="false">
+        <span class="glyph" aria-hidden="true">⚙</span><span>Settings</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ---------------------------------------------------------- Detail sheet -->
+  <div class="sheet-backdrop" id="sheet-backdrop"></div>
+  <div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-sym">
+    <div class="sheet-handle"></div>
+    <div class="sheet-head">
+      <div class="sheet-title">
+        <h2 id="sheet-sym">—</h2>
+        <p id="sheet-name"></p>
+      </div>
+      <button class="star" id="sheet-star" aria-label="Toggle watchlist">☆</button>
+      <button class="star" id="sheet-close" aria-label="Close">✕</button>
+    </div>
+    <div class="sheet-body" id="sheet-body"></div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
